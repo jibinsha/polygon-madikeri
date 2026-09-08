@@ -2233,9 +2233,12 @@ async function allOpenMapFarmers() {
   }
 
   const [rows, done] = await Promise.all([
+    // Keep the Open Map compatible with older Supabase databases where
+    // the optional display columns may not have been added yet. The master
+    // CSV below supplies farm name/area when those columns are unavailable.
     fetchAllRows(
       "farmers",
-      "id,bp_number,farmer_name,phone,name_in_bpm,farm_name,area_under_rejuvenation,latitude,longitude",
+      "id,bp_number,farmer_name,phone,latitude,longitude",
       "id"
     ),
     fetchAllRows(
