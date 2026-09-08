@@ -27,8 +27,21 @@ const adminLinks=[
 
 function Shell(){
  const [open,setOpen]=useState(false);
+ const [online,setOnline]=useState(navigator.onLine);
  const location=useLocation();
  const {profile,isAdmin,signOut}=useAuth();
+
+ useEffect(()=>{
+  const onOnline=()=>setOnline(true);
+  const onOffline=()=>setOnline(false);
+  window.addEventListener("online",onOnline);
+  window.addEventListener("offline",onOffline);
+  return()=>{window.removeEventListener("online",onOnline);window.removeEventListener("offline",onOffline)};
+ },[]);
+
+ useEffect(()=>{
+  if(profile?.user_id) import("./api").then(({api})=>api.primeOfflineData().catch(()=>{}));
+ },[profile?.user_id]);
  useEffect(()=>{window.scrollTo({top:0,left:0,behavior:"auto"});setOpen(false)},[location.pathname]);
  const adminArea=location.pathname.startsWith("/admin");
  const links=adminArea?adminLinks:fieldLinks;
@@ -46,7 +59,7 @@ function Shell(){
   </aside>
   {open&&<div className="scrim" onClick={()=>setOpen(false)}/>}
   <section className="main">
-   <header className="topbar"><button className="mobile-menu" onClick={()=>setOpen(true)}><Menu size={21}/></button><div className="topbar-title">Polygon Project : Madikeri</div><div className="topbar-right"><span className="role-badge">{profile?.role||"user"}</span><span className="online"><i/> Connected</span></div></header>
+   <header className="topbar"><button className="mobile-menu" onClick={()=>setOpen(true)}><Menu size={21}/></button><div className="topbar-title">Polygon Project : Madikeri</div><div className="topbar-right"><span className="role-badge">{profile?.role||"user"}</span><span className={`online ${online?"":"offline"}`}><i/> {online ? "Connected" : "Offline · saved data"}</span></div></header>
    <Routes>
     <Route path="/" element={<Dashboard/>}/>
     <Route path="/cluster-map" element={<ClusterMap/>}/>

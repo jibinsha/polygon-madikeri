@@ -1923,7 +1923,7 @@ app.get(
         pending: statusBase.filter((r) => r.status === "Pending").length,
       };
 
-      const pageSize = Math.min(Math.max(Number.parseInt(req.query.page_size, 10) || 40, 1), 100);
+      const pageSize = Math.min(Math.max(Number.parseInt(req.query.page_size, 10) || 40, 1), 2500);
       const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
       const start = (page - 1) * pageSize;
 

@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { offlineGet, offlinePut } from "./offlineStore";
 
 const API =
   import.meta.env.VITE_API_BASE_URL ||
@@ -7,10 +8,200 @@ const API =
 // Keep the current access token in memory so ordinary API calls do not
 // repeatedly ask Supabase for the session from storage.
 let cachedAccessToken = "";
+let cachedUserId = "";
+let syncInProgress = false;
+const OFFLINE_MASTER_KEY = "farmers-master";
+const OFFLINE_QUEUE_KEY = "completion-queue";
+const OFFLINE_API_PREFIX = "api:";
+const userScopedKey = (base) => `${base}:${cachedUserId || "unknown-user"}`;
+
+const isNetworkError = (error) => {
+  if (!navigator.onLine) return true;
+  return error instanceof TypeError || /network|failed to fetch|load failed|offline/i.test(error?.message || "");
+};
+
+const notifyOfflineChange = () => {
+  window.dispatchEvent(new CustomEvent("polygon-offline-change"));
+};
+
+async function queueCompletion(bp, completed, remarks) {
+  const queue = (await offlineGet(userScopedKey(OFFLINE_QUEUE_KEY))) || [];
+  const next = {
+    bp: String(bp),
+    completed: Boolean(completed),
+    remarks: remarks || "",
+    queuedAt: new Date().toISOString(),
+  };
+  // Keep only the newest offline action for a BP.
+  const filtered = queue.filter((item) => String(item.bp) !== String(bp));
+  filtered.push(next);
+  await offlinePut(userScopedKey(OFFLINE_QUEUE_KEY), filtered);
+  notifyOfflineChange();
+  return { ok: true, bp, completed: Boolean(completed), remarks: remarks || "", offlineQueued: true };
+}
+
+async function readCachedApi(path) {
+  return offlineGet(userScopedKey(OFFLINE_API_PREFIX + path));
+}
+
+async function cacheApi(path, data) {
+  await offlinePut(userScopedKey(OFFLINE_API_PREFIX + path), data);
+}
+
+async function readOfflineMaster() {
+  return offlineGet(userScopedKey(OFFLINE_MASTER_KEY));
+}
+
+async function writeOfflineMaster(data) {
+  await offlinePut(userScopedKey(OFFLINE_MASTER_KEY), { ...data, cachedAt: Date.now() });
+}
+
+async function updateOfflineCompletion(bp, completed, remarks = "") {
+  const master = await readOfflineMaster();
+  if (!master || !Array.isArray(master.farmers)) return;
+  const at = completed ? new Date().toISOString() : null;
+  const farmers = master.farmers.map((farmer) => {
+    if (String(farmer.bp) !== String(bp)) return farmer;
+    return {
+      ...farmer,
+      status: completed ? "Completed" : "Pending",
+      completion_date: at,
+      remarks: remarks || farmer.remarks || "",
+    };
+  });
+  const nextMaster = { ...master, farmers };
+  await writeOfflineMaster(nextMaster);
+
+  const dashboard = await readCachedApi("/api/dashboard?");
+  if (dashboard?.totals) {
+    const total = farmers.length;
+    const completedCount = farmers.filter((item) => item.status === "Completed").length;
+    const countsByTrader = new Map();
+    for (const item of farmers) {
+      const trader = item.trader || "Unknown";
+      const entry = countsByTrader.get(trader) || { total: 0, completed: 0 };
+      entry.total += 1;
+      if (item.status === "Completed") entry.completed += 1;
+      countsByTrader.set(trader, entry);
+    }
+    await cacheApi("/api/dashboard?", {
+      ...dashboard,
+      totals: {
+        ...dashboard.totals,
+        farmers: total,
+        completed: completedCount,
+        pending: total - completedCount,
+        progress: total ? Math.round((completedCount / total) * 100) : 0,
+      },
+      traders: (dashboard.traders || []).map((item) => {
+        const next = countsByTrader.get(item.trader);
+        return next ? { ...item, completed: next.completed, pending: next.total - next.completed, progress: next.total ? Math.round((next.completed / next.total) * 100) : 0 } : item;
+      }),
+    });
+  }
+
+  const openMap = await readCachedApi("/api/open-map");
+  if (openMap?.farmers) {
+    await cacheApi("/api/open-map", {
+      ...openMap,
+      farmers: openMap.farmers.map((farmer) => String(farmer.bp) === String(bp)
+        ? { ...farmer, status: completed ? "Completed" : "Pending", completion_date: at }
+        : farmer),
+    });
+  }
+}
+
+function applyOfflineFarmerFilters(master, params = {}) {
+  const all = Array.isArray(master?.farmers) ? master.farmers : [];
+  const q = String(params.q || "").trim().toLowerCase();
+  const team = String(params.team || "");
+  const day = String(params.day || "");
+  const trader = String(params.trader || "");
+  const status = String(params.status || "").toLowerCase();
+  const completionDate = String(params.completion_date || "");
+  const completionFrom = String(params.completion_from || "");
+  const completionTo = String(params.completion_to || "");
+
+  const matches = all.filter((r) => {
+    if (trader && String(r.trader || "") !== trader) return false;
+    if (team && String(r.team || "") !== team) return false;
+    if (day && String(r.day || "") !== day) return false;
+    if (status && String(r.status || "").toLowerCase() !== status) return false;
+    const completedDate = r.completion_date ? String(r.completion_date).slice(0, 10) : "";
+    if (completionDate && completedDate !== completionDate) return false;
+    if (completionFrom && (!completedDate || completedDate < completionFrom)) return false;
+    if (completionTo && (!completedDate || completedDate > completionTo)) return false;
+    if (q) {
+      const haystack = [r.bp, r.name, r.phone, r.village, r.estate, r.trader, r.cluster, r.team, r.day, r.route_group, r.name_in_bpm, r.farm_name]
+        .map((x) => String(x ?? "").toLowerCase()).join(" ");
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const completed = all.filter((r) => r.status === "Completed").length;
+  const pending = all.length - completed;
+  const filteredCompleted = matches.filter((r) => r.status === "Completed").length;
+  const filteredPending = matches.length - filteredCompleted;
+  const pageSize = Math.min(Math.max(Number.parseInt(params.page_size, 10) || 40, 1), 100);
+  const page = Math.max(Number.parseInt(params.page, 10) || 1, 1);
+  const start = (page - 1) * pageSize;
+
+  return {
+    farmers: matches.slice(start, start + pageSize),
+    total: matches.length,
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(matches.length / pageSize)),
+    statusCounts: { all: all.length, completed, pending, filteredCompleted, filteredPending },
+    options: master.options || {},
+    allTotal: all.length,
+    offline: true,
+  };
+}
+
+async function flushCompletionQueue() {
+  if (syncInProgress || !navigator.onLine) return;
+  const queue = (await offlineGet(userScopedKey(OFFLINE_QUEUE_KEY))) || [];
+  if (!queue.length) return;
+
+  syncInProgress = true;
+  try {
+    const remaining = [];
+    for (const item of queue) {
+      try {
+        await request(`/api/farmers/${encodeURIComponent(item.bp)}/completion`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ completed: item.completed, remarks: item.remarks || "" }),
+        });
+        await updateOfflineCompletion(item.bp, item.completed, item.remarks || "");
+      } catch (error) {
+        remaining.push(item);
+        if (isNetworkError(error)) break;
+      }
+    }
+    await offlinePut(userScopedKey(OFFLINE_QUEUE_KEY), remaining);
+    if (!remaining.length) notifyOfflineChange();
+  } finally {
+    syncInProgress = false;
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    flushCompletionQueue().catch(() => {}).finally(() => {
+      // Reconcile the complete offline snapshot after signal returns.
+      setTimeout(() => api?.primeOfflineData?.().catch(() => {}), 1200);
+    });
+  });
+  setInterval(() => flushCompletionQueue().catch(() => {}), 15000);
+}
 
 if (supabase) {
   supabase.auth.onAuthStateChange((_event, session) => {
     cachedAccessToken = session?.access_token || "";
+    cachedUserId = session?.user?.id || "";
   });
 }
 
@@ -19,61 +210,52 @@ if (supabase) {
 ====================================================== */
 
 async function request(path, options = {}, tokenOverride) {
-  const headers = new Headers(
-    options.headers || {}
-  );
-
+  const headers = new Headers(options.headers || {});
+  const method = String(options.method || "GET").toUpperCase();
   let token = tokenOverride || cachedAccessToken;
 
   if (!token && supabase) {
     const { data } = await supabase.auth.getSession();
     token = data.session?.access_token || "";
     cachedAccessToken = token;
+    cachedUserId = data.session?.user?.id || cachedUserId;
   }
 
-  if (token) {
-    headers.set(
-      "Authorization",
-      `Bearer ${token}`
-    );
-  }
-
-  let response = await fetch(`${API}${path}`, { ...options, headers });
-
-  // Recover transparently from an expired access token without changing the
-  // login workflow. Supabase refreshes the session and we retry once.
-  if (response.status === 401 && supabase) {
-    const { data: refreshed } = await supabase.auth.refreshSession();
-    const freshToken = refreshed.session?.access_token;
-    if (freshToken) {
-      headers.set("Authorization", `Bearer ${freshToken}`);
-      response = await fetch(`${API}${path}`, { ...options, headers });
-    }
-  }
-
-  const text =
-    await response.text();
-
-  let data = {};
+  if (token) headers.set("Authorization", `Bearer ${token}`);
 
   try {
-    data = text
-      ? JSON.parse(text)
-      : {};
-  } catch {
-    data = {
-      error: text,
-    };
-  }
+    let response = await fetch(`${API}${path}`, { ...options, headers });
 
-  if (!response.ok) {
-    throw new Error(
-      data.error ||
-      `Request failed: ${response.status}`
-    );
-  }
+    if (response.status === 401 && supabase) {
+      const { data: refreshed } = await supabase.auth.refreshSession();
+      const freshToken = refreshed.session?.access_token;
+      if (freshToken) {
+        headers.set("Authorization", `Bearer ${freshToken}`);
+        cachedAccessToken = freshToken;
+        cachedUserId = refreshed.session?.user?.id || cachedUserId;
+        response = await fetch(`${API}${path}`, { ...options, headers });
+      }
+    }
 
-  return data;
+    const text = await response.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+
+    if (!response.ok) {
+      throw new Error(data.error || `Request failed: ${response.status}`);
+    }
+
+    if (method === "GET") {
+      cacheApi(path, data).catch(() => {});
+    }
+    return data;
+  } catch (error) {
+    if (method === "GET" && isNetworkError(error)) {
+      const cached = await readCachedApi(path);
+      if (cached != null) return { ...cached, offline: true };
+    }
+    throw error;
+  }
 }
 
 /* ======================================================
@@ -123,32 +305,46 @@ export const api = {
      Farmers
   ---------------------------------------------------- */
 
-  farmers: (params = {}) =>
-    request(
-      `/api/farmers?${query(params)}`
-    ),
-
-  setCompleted: (
-    bp,
-    completed,
-    remarks = ""
-  ) =>
-    request(
-      `/api/farmers/${encodeURIComponent(
-        bp
-      )}/completion`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":
-            "application/json",
-        },
-        body: JSON.stringify({
-          completed,
-          remarks,
-        }),
+  farmers: async (params = {}) => {
+    if (!navigator.onLine) {
+      const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params);
+      if (cached) return cached;
+    }
+    try {
+      return await request(`/api/farmers?${query(params)}`);
+    } catch (error) {
+      if (isNetworkError(error)) {
+        const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params);
+        if (cached) return cached;
       }
-    ),
+      throw error;
+    }
+  },
+
+  setCompleted: async (bp, completed, remarks = "") => {
+    if (!navigator.onLine) {
+      await updateOfflineCompletion(bp, completed, remarks);
+      return queueCompletion(bp, completed, remarks);
+    }
+    try {
+      const result = await request(
+        `/api/farmers/${encodeURIComponent(bp)}/completion`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ completed, remarks }),
+        }
+      );
+      await updateOfflineCompletion(bp, completed, remarks);
+      return result;
+    } catch (error) {
+      if (isNetworkError(error)) {
+        await updateOfflineCompletion(bp, completed, remarks);
+        return queueCompletion(bp, completed, remarks);
+      }
+      throw error;
+    }
+  },
 
   /* ----------------------------------------------------
      Open Map
@@ -177,10 +373,9 @@ export const api = {
       "/api/team-locations"
     ),
 
-  updateTeamLocation: (
-    location
-  ) =>
-    request(
+  updateTeamLocation: async (location) => {
+    if (!navigator.onLine) return { ok: true, offline: true };
+    return request(
       "/api/team-location",
       {
         method: "POST",
@@ -189,16 +384,13 @@ export const api = {
             "application/json",
         },
         body: JSON.stringify({
-          latitude:
-            location.latitude,
-          longitude:
-            location.longitude,
-          accuracy:
-            location.accuracy ??
-            null,
+          latitude: location.latitude,
+          longitude: location.longitude,
+          accuracy: location.accuracy ?? null,
         }),
       }
-    ),
+    );
+  },
 
   /* ----------------------------------------------------
      Admin / Master Data
@@ -247,6 +439,32 @@ export const api = {
         method: "DELETE",
       }
     ),
+
+  /* ----------------------------------------------------
+     Offline field-data cache
+  ---------------------------------------------------- */
+
+  primeOfflineData: async () => {
+    if (!navigator.onLine) return { offline: true };
+    try {
+      const [farmers, openMap] = await Promise.all([
+        request(`/api/farmers?${query({ page: 1, page_size: 2500 })}`),
+        request("/api/open-map"),
+      ]);
+      await writeOfflineMaster(farmers);
+      await cacheApi(`/api/open-map`, openMap);
+      return { ok: true };
+    } catch (error) {
+      console.warn("Offline data preparation skipped:", error?.message || error);
+      return { ok: false };
+    }
+  },
+
+  offlineFarmers: async (params = {}) => {
+    const master = await readOfflineMaster();
+    if (!master) return null;
+    return applyOfflineFarmerFilters(master, params);
+  },
 
   /* ----------------------------------------------------
      Health

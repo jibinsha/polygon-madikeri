@@ -1,0 +1,9 @@
+{
+  "name": "Polygon Project : Madikeri",
+  "short_name": "Polygon Madikeri",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f8f6",
+  "theme_color": "#173f2c",
+  "description": "Madikeri field operations and farmer visit application"
+}

@@ -43,3 +43,13 @@ Frontend: `cd frontend && npm install && npm run dev`
 - Completion audit logging no longer delays the completion response.
 - Frontend builds route entry files so refreshing React routes on the Render static site does not return `Not Found`.
 - No other workflow or map/filter/admin behavior was intentionally changed.
+
+## Offline / low-network field mode
+- Added IndexedDB-backed offline farmer snapshot and API response cache.
+- Full farmer data is prepared in the background after a successful sign-in while online.
+- Farmer filtering works from the saved snapshot when offline.
+- Complete/Reopen actions queue locally when offline and synchronize automatically when connectivity returns.
+- Open Map data remains available offline from the cached snapshot.
+- Service worker caches the application shell and OpenStreetMap tiles as they are viewed.
+- Offline refresh/deep links fall back to the cached application shell.
+- No field navigation or existing workflow was removed or changed.

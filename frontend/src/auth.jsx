@@ -3,6 +3,23 @@ import { supabase } from "./supabase";
 import { api } from "./api";
 
 const AuthContext = createContext(null);
+const PROFILE_STORAGE_KEY = "polygon-madikeri-profile";
+
+function readStoredProfile(userId) {
+  try {
+    const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (saved?.userId && String(saved.userId) === String(userId)) return saved.profile || null;
+  } catch {}
+  return null;
+}
+
+function storeProfile(userId, nextProfile) {
+  try {
+    localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify({ userId, profile: nextProfile, at: Date.now() }));
+  } catch {}
+}
 
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
@@ -39,6 +56,7 @@ export function AuthProvider({ children }) {
       const r = await api.authMe(s.access_token);
       const nextProfile = r.profile || null;
       profileCache.current.set(userId, { profile: nextProfile, at: Date.now() });
+      storeProfile(userId, nextProfile);
       loadedUserId.current = userId;
       setProfile(nextProfile);
     } catch (e) {
@@ -51,12 +69,22 @@ export function AuthProvider({ children }) {
           const r = await api.authMe(fresh.access_token);
           const nextProfile = r.profile || null;
           profileCache.current.set(fresh.user.id, { profile: nextProfile, at: Date.now() });
+          storeProfile(fresh.user.id, nextProfile);
           loadedUserId.current = fresh.user.id;
           setProfile(nextProfile);
           return;
         }
       } catch (refreshError) {
         console.error(refreshError);
+      }
+
+      if (!navigator.onLine) {
+        const stored = readStoredProfile(userId);
+        if (stored) {
+          loadedUserId.current = userId;
+          setProfile(stored);
+          return;
+        }
       }
 
       console.error(e);
@@ -141,6 +169,7 @@ export function AuthProvider({ children }) {
         setSession(null);
         setProfile(null);
         loadedUserId.current = "";
+        try { localStorage.removeItem(PROFILE_STORAGE_KEY); } catch {}
       },
     }),
     [session, profile, loading]
