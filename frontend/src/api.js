@@ -30,13 +30,18 @@ async function request(path, options = {}, tokenOverride) {
     );
   }
 
-  const response = await fetch(
-    `${API}${path}`,
-    {
-      ...options,
-      headers,
+  let response = await fetch(`${API}${path}`, { ...options, headers });
+
+  // Recover transparently from an expired access token without changing the
+  // login workflow. Supabase refreshes the session and we retry once.
+  if (response.status === 401 && supabase) {
+    const { data: refreshed } = await supabase.auth.refreshSession();
+    const freshToken = refreshed.session?.access_token;
+    if (freshToken) {
+      headers.set("Authorization", `Bearer ${freshToken}`);
+      response = await fetch(`${API}${path}`, { ...options, headers });
     }
-  );
+  }
 
   const text =
     await response.text();
@@ -135,6 +140,15 @@ export const api = {
           remarks,
         }),
       }
+    ),
+
+  /* ----------------------------------------------------
+     Open Map
+  ---------------------------------------------------- */
+
+  openMap: () =>
+    request(
+      "/api/open-map"
     ),
 
   /* ----------------------------------------------------

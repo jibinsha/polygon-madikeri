@@ -13,7 +13,7 @@ import {AuthProvider,RequireAdmin,RequireAuth,useAuth} from "./auth";
 
 const fieldLinks=[
  {to:"/",label:"Dashboard",icon:LayoutDashboard,end:true},
- {to:"/cluster-map",label:"Cluster Map",icon:Map},
+ {to:"/cluster-map",label:"Open Map",icon:Map},
  {to:"/farmers",label:"Farmers",icon:Users},
  {to:"/team-location",label:"Team Location",icon:MapPin},
 ];

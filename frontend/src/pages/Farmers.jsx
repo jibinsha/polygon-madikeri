@@ -46,10 +46,10 @@ export default function Farmers() {
 
   const set = (key, value) => setFilters((x) => ({ ...x, [key]: value }));
 
-  const load = () => {
+  const load = (pageOverride = page) => {
     setLoading(true);
     setError("");
-    api.farmers(filters)
+    api.farmers({ ...filters, page: pageOverride, page_size: 40 })
       .then(setData)
       .catch((e) => setError(e.message || "Unable to load farmers"))
       .finally(() => setLoading(false));
@@ -57,9 +57,13 @@ export default function Farmers() {
 
   useEffect(() => {
     setPage(1);
-    const timer = setTimeout(load, 180);
+    const timer = setTimeout(() => load(1), 350);
     return () => clearTimeout(timer);
   }, [filters.q, filters.team, filters.day, filters.status, filters.completion_date, filters.completion_from, filters.completion_to]);
+
+  useEffect(() => {
+    if (page > 1) load(page);
+  }, [page]);
 
   useEffect(() => {
     const p = {};
@@ -67,11 +71,8 @@ export default function Farmers() {
     setParams(p, { replace: true });
   }, [filters, setParams]);
 
-  const shown = useMemo(
-    () => data.farmers.slice((page - 1) * 40, page * 40),
-    [data.farmers, page]
-  );
-  const pages = Math.max(1, Math.ceil(data.farmers.length / 40));
+  const shown = useMemo(() => data.farmers || [], [data.farmers]);
+  const pages = Math.max(1, data.totalPages || Math.ceil((data.total || 0) / 40));
 
   const counts = data.statusCounts || {
     all: data.farmers.length,

@@ -16,7 +16,7 @@ This build uses one persistent Supabase database with two role-based interfaces.
 
 ### Enumerator
 - Dashboard
-- Cluster Map
+- Open Map
 - Farmers
 - Traders
 - Field Planner

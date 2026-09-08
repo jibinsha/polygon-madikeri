@@ -15,6 +15,20 @@ export function AuthProvider({children}){
    const r=await api.authMe(s.access_token);
    setProfile(r.profile||null);
   }catch(e){
+   // If the stored access token expired while the app was closed, refresh
+   // the Supabase session and retry without changing the login workflow.
+   try {
+    const {data: refreshed}=await supabase.auth.refreshSession();
+    const fresh=refreshed.session;
+    if(fresh?.access_token){
+      setSession(fresh);
+      const r=await api.authMe(fresh.access_token);
+      setProfile(r.profile||null);
+      return;
+    }
+   } catch(refreshError){
+    console.error(refreshError);
+   }
    console.error(e);
    setProfile(null);
   }finally{setLoading(false);}

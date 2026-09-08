@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   MapContainer,
   TileLayer,
   CircleMarker,
-  Polygon,
+  Circle,
   Popup,
   Tooltip,
   useMap,
@@ -13,1564 +13,387 @@ import {
   LocateFixed,
   Maximize2,
   RefreshCw,
-  Search,
-  X,
-  Navigation,
   MapPinned,
   Phone,
-  Crosshair,
+  Navigation,
+  Users,
+  CheckCircle2,
+  Clock3,
+  X,
 } from "lucide-react";
-import { Link, useSearchParams } from "react-router-dom";
-import * as turf from "@turf/turf";
+import { Link } from "react-router-dom";
 import { api } from "../api";
-import { Select } from "../components";
 import "leaflet/dist/leaflet.css";
 
 const CENTER = [13.0714100566, 75.6442024220];
+const FARMER_FIT_MAX_ZOOM = 13;
+const TEAM_REFRESH_MS = 10000;
+const LOCATION_SEND_MS = 15000;
 
 const mapsUrl = (lat, lon) =>
-  `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-    `${lat},${lon}`
-  )}`;
+  `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lon}`)}`;
 
-/*
-  This component only controls the map view.
+const directionsUrl = (lat, lon, origin) => {
+  const params = new URLSearchParams({
+    api: "1",
+    destination: `${lat},${lon}`,
+  });
+  if (origin?.lat != null && origin?.lon != null) {
+    params.set("origin", `${origin.lat},${origin.lon}`);
+  }
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+};
 
-  IMPORTANT:
-  "focus" is NOT a data filter.
-  It only decides which cluster the map should zoom to.
-  All clusters/farmers remain loaded and visible.
-*/
-function Fit({ points = [], focus = "" }) {
+function FitOnce({ points }) {
   const map = useMap();
+  const fitted = useRef(false);
 
   useEffect(() => {
-    const target = focus
-      ? points.filter(
-          (x) =>
-            String(x.cluster) === String(focus)
-        )
-      : points;
-
-    const valid = target.filter(
-      (x) =>
-        Number.isFinite(Number(x.lat)) &&
-        Number.isFinite(Number(x.lon))
+    if (fitted.current || !points?.length) return;
+    const valid = points.filter(
+      (p) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon))
     );
-
     if (!valid.length) return;
 
     try {
       map.fitBounds(
-        valid.map((x) => [
-          Number(x.lat),
-          Number(x.lon),
-        ]),
-        {
-          padding: [35, 35],
-          maxZoom: focus ? 16 : 12,
-        }
+        valid.map((p) => [Number(p.lat), Number(p.lon)]),
+        { padding: [45, 45], maxZoom: FARMER_FIT_MAX_ZOOM }
       );
-    } catch (error) {
-      console.warn(
-        "Unable to fit cluster map:",
-        error
-      );
+      fitted.current = true;
+    } catch {
+      // Keep the default Madikeri view if fitting fails.
     }
-  }, [points, focus, map]);
+  }, [points, map]);
 
   return null;
 }
 
-function Locate() {
+function LocateControl({ onLocate }) {
   const map = useMap();
-
   return (
     <button
       className="map-control"
       title="My location"
-      onClick={() =>
-        map.locate({
-          setView: true,
-          maxZoom: 16,
-          enableHighAccuracy: true,
-        })
-      }
       type="button"
+      onClick={() => {
+        map.locate({ setView: true, maxZoom: 17, enableHighAccuracy: true });
+        onLocate?.();
+      }}
     >
       <LocateFixed size={18} />
     </button>
   );
 }
 
-function Full() {
+function FullscreenControl() {
   const map = useMap();
-
   return (
     <button
       className="map-control second"
-      title="Fullscreen"
-      onClick={() => {
-        if (document.fullscreenElement) {
-          document.exitFullscreen();
-        } else {
-          map
-            .getContainer()
-            .requestFullscreen?.();
-        }
-      }}
+      title="Fullscreen map"
       type="button"
+      onClick={() => {
+        if (document.fullscreenElement) document.exitFullscreen?.();
+        else map.getContainer().requestFullscreen?.();
+      }}
     >
       <Maximize2 size={18} />
     </button>
   );
 }
 
-function CenterOffice({ office }) {
+function RecenterControl({ location }) {
   const map = useMap();
-
-  if (!office) return null;
-
   return (
     <button
       className="map-control third"
-      title="Office"
-      onClick={() =>
-        map.setView(
-          [
-            Number(office.lat),
-            Number(office.lon),
-          ],
-          14
-        )
-      }
+      title="Center on my location"
       type="button"
+      disabled={!location}
+      onClick={() => {
+        if (location) map.setView([location.lat, location.lon], 17, { animate: true });
+      }}
     >
       <Navigation size={17} />
     </button>
   );
 }
 
-export default function ClusterMap() {
-  const [params, setParams] =
-    useSearchParams();
+function ageLabel(iso) {
+  if (!iso) return "No location";
+  const mins = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins} min ago`;
+  return `${Math.floor(mins / 60)} hr ago`;
+}
 
-  /*
-    Cluster in the URL is treated as the
-    initial MAP FOCUS only.
+function distanceKm(a, b) {
+  if (!a || !b) return null;
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
 
-    It is deliberately NOT placed in filters.
-  */
-  const initialFilters = {
-    q: params.get("q") || "",
-    trader: params.get("trader") || "",
-    team: params.get("team") || "",
-    day: params.get("day") || "",
-    cluster: "",
-    status: params.get("status") || "",
-  };
-
-  const initialFocus =
-    params.get("cluster") || "";
-
-  const [filters, setFilters] =
-    useState(initialFilters);
-
-  const [focus, setFocus] =
-    useState(initialFocus);
-
-  const [data, setData] =
-    useState({
-      points: [],
-      clusterPoints: [],
-      clusters: [],
-      totals: {},
-      options: {},
-      office: {
-        lat: 13.137,
-        lon: 75.606,
-        name: "Office/Base",
-      },
-    });
-
-  const [loading, setLoading] =
-    useState(true);
-
-  const [error, setError] =
-    useState("");
-
-  const [selected, setSelected] =
-    useState(null);
-
-  /*
-    Change a real filter.
-
-    Changing a real filter clears the
-    visual cluster focus because the available
-    data may have changed.
-  */
-  const setFilter = (
-    key,
-    value
-  ) => {
-    setFocus("");
-
-    setFilters((current) => ({
-      ...current,
-      [key]: value,
-    }));
-  };
-
-  /*
-    Cluster selection ONLY changes the map
-    zoom/focus. It does NOT change filters
-    and therefore does NOT remove other clusters.
-  */
-  const focusCluster = (cluster) => {
-    const value = String(
-      cluster ?? ""
-    );
-
-    setFocus(value);
-  };
-
-  const clearFocus = () => {
-    setFocus("");
-  };
-
-  const load = () => {
-    setLoading(true);
-    setError("");
-
-    api
-      .clusterMap(filters)
-      .then((result) => {
-        setData(result);
-      })
-      .catch((err) => {
-        setError(
-          err?.message ||
-            "Unable to load cluster map."
-        );
-      })
-      .finally(() => {
-        setLoading(false);
-      });
-  };
-
-  /*
-    Load only when actual filters change.
-    Focus does NOT reload/filter the data.
-  */
-  useEffect(() => {
-    const timer = setTimeout(
-      load,
-      140
-    );
-
-    return () =>
-      clearTimeout(timer);
-  }, [
-    filters.q,
-    filters.trader,
-    filters.team,
-    filters.day,
-    filters.status,
-  ]);
-
-  /*
-    Keep the URL useful for sharing,
-    but cluster remains a visual focus,
-    not an API filter.
-  */
-  useEffect(() => {
-    const next = {};
-
-    Object.entries(filters).forEach(
-      ([key, value]) => {
-        if (
-          key !== "cluster" &&
-          value
-        ) {
-          next[key] = value;
-        }
-      }
-    );
-
-    if (focus) {
-      next.cluster = focus;
-    }
-
-    setParams(next, {
-      replace: true,
-    });
-  }, [
-    filters,
-    focus,
-    setParams,
-  ]);
-
-  /*
-    Group the complete currently-loaded
-    dataset by cluster.
-  */
-  const grouped = useMemo(
-    () =>
-      data.clusters.map(
-        (cluster) => ({
-          ...cluster,
-
-          points:
-            data.clusterPoints.filter(
-              (point) =>
-                String(point.cluster) ===
-                String(
-                  cluster.cluster
-                )
-            ),
-
-          farmers:
-            data.points.filter(
-              (farmer) =>
-                String(farmer.cluster) ===
-                String(
-                  cluster.cluster
-                )
-            ),
-        })
-      ),
-    [data]
-  );
-
-  /*
-    Cluster boundary polygons.
-  */
-  const polygons = useMemo(
-    () =>
-      grouped
-        .map((cluster) => {
-          if (
-            cluster.points.length < 3
-          ) {
-            return null;
-          }
-
-          try {
-            const hull =
-              turf.convex(
-                turf.featureCollection(
-                  cluster.points.map(
-                    (point) =>
-                      turf.point([
-                        Number(
-                          point.lon
-                        ),
-                        Number(
-                          point.lat
-                        ),
-                      ])
-                  )
-                )
-              );
-
-            return hull
-              ? {
-                  cluster,
-                  hull,
-                }
-              : null;
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean),
-    [grouped]
-  );
-
-  /*
-    Farmer core areas.
-  */
-  const farmerCore = useMemo(
-    () =>
-      grouped
-        .map((cluster) => {
-          const points =
-            cluster.farmers.filter(
-              (farmer) =>
-                Number.isFinite(
-                  Number(
-                    farmer.lat
-                  )
-                ) &&
-                Number.isFinite(
-                  Number(
-                    farmer.lon
-                  )
-                )
-            );
-
-          if (points.length < 3) {
-            return null;
-          }
-
-          try {
-            const hull =
-              turf.convex(
-                turf.featureCollection(
-                  points.map(
-                    (point) =>
-                      turf.point([
-                        Number(
-                          point.lon
-                        ),
-                        Number(
-                          point.lat
-                        ),
-                      ])
-                  )
-                )
-              );
-
-            return hull
-              ? {
-                  cluster,
-                  hull,
-                }
-              : null;
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean),
-    [grouped]
-  );
-
-  const clear = () => {
-    setFilters({
-      q: "",
-      trader: "",
-      team: "",
-      day: "",
-      cluster: "",
-      status: "",
-    });
-
-    setFocus("");
-    setSelected(null);
-  };
-
+function FarmerPopup({ farmer, myLocation }) {
+  const distance = distanceKm(myLocation, { lat: Number(farmer.lat), lon: Number(farmer.lon) });
   return (
-    <div className="map-page">
+    <div className="popup farmer-map-popup">
+      <small>FARMER</small>
+      <h3>{farmer.name || "Unnamed farmer"}</h3>
+      <code>{farmer.bp || "—"}</code>
+      <span className={`status ${farmer.status === "Completed" ? "done" : "pending"}`}>
+        {farmer.status === "Completed" ? "Completed" : "Pending"}
+      </span>
 
-      {/* =================================================
-          TOOLBAR
-      ================================================= */}
-
-      <div className="map-toolbar">
-
-        <Link
-          to="/"
-          className="back-link"
-        >
-          <ArrowLeft size={17} />
-          Dashboard
-        </Link>
-
-        <div className="map-title">
-
-          <div className="eyebrow">
-            FARMER GEOGRAPHY
-          </div>
-
-          <h1>
-            Cluster Map
-          </h1>
-
-        </div>
-
-        <div className="map-kpis">
-
-          <b>
-            {data.totals.farmers || 0}
-            <span>Farmers</span>
-          </b>
-
-          <b>
-            {data.totals.clusters || 0}
-            <span>Clusters</span>
-          </b>
-
-          <b>
-            {data.totals.completed || 0}
-            <span>Done</span>
-          </b>
-
-        </div>
-
+      <div className="popup-grid">
+        <span>Trader</span><b>{farmer.trader || "—"}</b>
+        <span>Team</span><b>{farmer.team || "—"}</b>
+        <span>Day</span><b>{farmer.day || "—"}</b>
+        <span>Cluster</span><b>{farmer.cluster || "—"}</b>
+        <span>Village</span><b>{farmer.village || "—"}</b>
+        <span>Name in BPM</span><b>{farmer.name_in_bpm || "—"}</b>
+        <span>Farm</span><b>{farmer.farm_name || "—"}</b>
+        <span>Area</span><b>{farmer.area_under_rejuvenation || "—"}</b>
+        {distance != null && <><span>Distance</span><b>{distance < 1 ? `${Math.round(distance * 1000)} m` : `${distance.toFixed(1)} km`}</b></>}
+        {farmer.completion_date && <><span>Completed</span><b>{new Date(farmer.completion_date).toLocaleString()}</b></>}
       </div>
 
-
-      {/* =================================================
-          FILTERS
-
-          Cluster selector is a ZOOM selector,
-          NOT a data filter.
-      ================================================= */}
-
-      <div className="map-filters">
-
-        <div className="map-search">
-
-          <div className="search-input">
-
-            <Search size={16} />
-
-            <input
-              placeholder="Search BP, farmer, village, cluster…"
-              value={filters.q}
-              onChange={(event) =>
-                setFilter(
-                  "q",
-                  event.target.value
-                )
-              }
-            />
-
-            {filters.q && (
-              <button
-                onClick={() =>
-                  setFilter("q", "")
-                }
-                type="button"
-              >
-                <X size={14} />
-              </button>
-            )}
-
-          </div>
-
-        </div>
-
-        <Select
-          label="Trader"
-          value={filters.trader}
-          options={
-            data.options.traders
-          }
-          onChange={(value) =>
-            setFilter(
-              "trader",
-              value
-            )
-          }
-        />
-
-        <Select
-          label="Team"
-          value={filters.team}
-          options={
-            data.options.teams
-          }
-          onChange={(value) =>
-            setFilter(
-              "team",
-              value
-            )
-          }
-        />
-
-        <Select
-          label="Day"
-          value={filters.day}
-          options={
-            data.options.days
-          }
-          onChange={(value) =>
-            setFilter(
-              "day",
-              value
-            )
-          }
-        />
-
-        <Select
-          label="Cluster / Zoom"
-          value={focus}
-          options={
-            data.options.clusters
-          }
-          onChange={focusCluster}
-        />
-
-        <Select
-          label="Status"
-          value={filters.status}
-          options={[
-            "Completed",
-            "Pending",
-          ]}
-          onChange={(value) =>
-            setFilter(
-              "status",
-              value
-            )
-          }
-        />
-
-        <button
-          className="clear-btn"
-          onClick={clear}
-          type="button"
-        >
-          Clear
-        </button>
-
-      </div>
-
-
-      {/* =================================================
-          MAIN MAP LAYOUT
-      ================================================= */}
-
-      <div className="map-layout">
-
-        {/* =================================================
-            CLUSTER LIST
-
-            ALL clusters remain in this list even after
-            clicking/focusing one.
-        ================================================= */}
-
-        <aside className="cluster-list">
-
-          <div className="list-title">
-
-            <div>
-
-              <div className="eyebrow">
-                CLUSTERS
-              </div>
-
-              <h2>
-                Farmer areas
-              </h2>
-
-            </div>
-
-            <div className="cluster-list-actions">
-
-              {focus && (
-                <button
-                  className="icon-btn"
-                  title="Show all clusters / reset zoom"
-                  onClick={clearFocus}
-                  type="button"
-                >
-                  <Crosshair size={16} />
-                </button>
-              )}
-
-              <button
-                className="icon-btn"
-                onClick={load}
-                title="Refresh"
-                type="button"
-              >
-                <RefreshCw size={16} />
-              </button>
-
-            </div>
-
-          </div>
-
-
-          {data.clusters.map(
-            (cluster) => {
-
-              const selectedCluster =
-                String(focus) ===
-                String(
-                  cluster.cluster
-                );
-
-              return (
-
-                <button
-                  key={
-                    cluster.cluster
-                  }
-
-                  className={
-                    `cluster-item ${
-                      selectedCluster
-                        ? "selected"
-                        : ""
-                    }`
-                  }
-
-                  onClick={() =>
-                    focusCluster(
-                      cluster.cluster
-                    )
-                  }
-
-                  type="button"
-                >
-
-                  <div className="cluster-name">
-
-                    <i
-                      style={{
-                        background:
-                          cluster.color,
-                      }}
-                    />
-
-                    <b>
-                      Cluster{" "}
-                      {cluster.cluster}
-                    </b>
-
-                    <span>
-                      {cluster.total ||
-                        0}
-                    </span>
-
-                  </div>
-
-
-                  <div className="small-progress">
-
-                    <div
-                      style={{
-                        width: `${pct(
-                          cluster.progress
-                        )}%`,
-
-                        background:
-                          cluster.color,
-                      }}
-                    />
-
-                  </div>
-
-
-                  <div className="cluster-meta">
-
-                    <span>
-                      {cluster.completed ||
-                        0}{" "}
-                      completed
-                    </span>
-
-                    <b>
-                      {cluster.progress ||
-                        0}
-                      %
-                    </b>
-
-                  </div>
-
-
-                  <small>
-                    {cluster.teams?.join(
-                      ", "
-                    ) ||
-                      "Team"}
-
-                    {" · "}
-
-                    {cluster.traders?.join(
-                      ", "
-                    ) ||
-                      "Trader"}
-                  </small>
-
-                </button>
-              );
-            }
-          )}
-
-
-          {!loading &&
-            !data.clusters.length && (
-              <div className="empty">
-                No clusters match the
-                current filters.
-              </div>
-            )}
-
-        </aside>
-
-
-        {/* =================================================
-            MAP
-        ================================================= */}
-
-        <section className="map-canvas">
-
-          <MapContainer
-            center={CENTER}
-            zoom={10}
-            className="leaflet-map"
-            preferCanvas
+      {farmer.remarks && <div className="popup-remarks"><span>Remarks</span><b>{farmer.remarks}</b></div>}
+
+      <div className="popup-actions">
+        {farmer.phone ? (
+          <a className="popup-action phone-action" href={`tel:${farmer.phone}`}>
+            <Phone size={13} /> Call {farmer.phone}
+          </a>
+        ) : null}
+        {farmer.lat != null && farmer.lon != null ? (
+          <a
+            className="popup-action map-link"
+            href={directionsUrl(farmer.lat, farmer.lon, myLocation)}
+            target="_blank"
+            rel="noreferrer"
           >
-
-            <TileLayer
-              attribution="&copy; OpenStreetMap contributors"
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            />
-
-
-            {/* Focus changes zoom only */}
-            <Fit
-              points={
-                data.points.length
-                  ? data.points
-                  : data.clusterPoints
-              }
-              focus={focus}
-            />
-
-
-            <Locate />
-
-            <Full />
-
-            <CenterOffice
-              office={data.office}
-            />
-
-
-            {/* =================================================
-                CLUSTER BOUNDARIES
-            ================================================= */}
-
-            {polygons.map(
-              ({
-                cluster,
-                hull,
-              }) => {
-
-                const selectedCluster =
-                  String(focus) ===
-                  String(
-                    cluster.cluster
-                  );
-
-                return (
-
-                  <Polygon
-                    key={
-                      `poly-${cluster.cluster}`
-                    }
-
-                    positions={
-                      hull
-                        .geometry
-                        .coordinates[0]
-                        .map(
-                          ([lon, lat]) => [
-                            lat,
-                            lon,
-                          ]
-                        )
-                    }
-
-                    pathOptions={{
-                      color:
-                        cluster.color,
-
-                      weight:
-                        selectedCluster
-                          ? 3
-                          : 2,
-
-                      fillColor:
-                        cluster.color,
-
-                      fillOpacity:
-                        selectedCluster
-                          ? 0.12
-                          : 0.04,
-
-                      dashArray:
-                        "5 5",
-                    }}
-
-                    eventHandlers={{
-                      click: () =>
-                        focusCluster(
-                          cluster.cluster
-                        ),
-                    }}
-                  >
-
-                    <Tooltip sticky>
-                      Cluster{" "}
-                      {cluster.cluster}{" "}
-                      boundary
-                    </Tooltip>
-
-                  </Polygon>
-                );
-              }
-            )}
-
-
-            {/* =================================================
-                FARMER CORE AREAS
-            ================================================= */}
-
-            {farmerCore.map(
-              ({
-                cluster,
-                hull,
-              }) => {
-
-                const selectedCluster =
-                  String(focus) ===
-                  String(
-                    cluster.cluster
-                  );
-
-                return (
-
-                  <Polygon
-                    key={
-                      `core-${cluster.cluster}`
-                    }
-
-                    positions={
-                      hull
-                        .geometry
-                        .coordinates[0]
-                        .map(
-                          ([lon, lat]) => [
-                            lat,
-                            lon,
-                          ]
-                        )
-                    }
-
-                    pathOptions={{
-                      color:
-                        cluster.color,
-
-                      weight:
-                        selectedCluster
-                          ? 2.5
-                          : 1.5,
-
-                      fillColor:
-                        cluster.color,
-
-                      fillOpacity:
-                        selectedCluster
-                          ? 0.24
-                          : 0.12,
-                    }}
-
-                    eventHandlers={{
-                      click: () =>
-                        focusCluster(
-                          cluster.cluster
-                        ),
-                    }}
-                  >
-
-                    <Tooltip sticky>
-                      Farmer core area ·
-                      Cluster{" "}
-                      {cluster.cluster}
-                    </Tooltip>
-
-                  </Polygon>
-                );
-              }
-            )}
-
-
-            {/* =================================================
-                CLUSTER MAP POINTS
-            ================================================= */}
-
-            {data.clusterPoints.map(
-              (point, index) => {
-
-                const selectedCluster =
-                  String(focus) ===
-                  String(
-                    point.cluster
-                  );
-
-                return (
-
-                  <CircleMarker
-                    key={
-                      `cp-${
-                        point.id ||
-                        index
-                      }`
-                    }
-
-                    center={[
-                      Number(
-                        point.lat
-                      ),
-                      Number(
-                        point.lon
-                      ),
-                    ]}
-
-                    radius={
-                      selectedCluster
-                        ? 5
-                        : 3.5
-                    }
-
-                    pathOptions={{
-                      color:
-                        point.color ||
-                        "#2f7d5b",
-
-                      fillColor:
-                        point.color ||
-                        "#2f7d5b",
-
-                      fillOpacity:
-                        0.7,
-
-                      weight: 1,
-                    }}
-                  >
-
-                    <Tooltip>
-                      Cluster{" "}
-                      {point.cluster}
-                      {" · "}
-                      {point.team}
-                      {" · Day "}
-                      {point.day}
-                    </Tooltip>
-
-                  </CircleMarker>
-                );
-              }
-            )}
-
-
-            {/* =================================================
-                FARMER GPS POINTS
-            ================================================= */}
-
-            {data.points.map(
-              (farmer, index) => {
-
-                const lat =
-                  Number(
-                    farmer.lat
-                  );
-
-                const lon =
-                  Number(
-                    farmer.lon
-                  );
-
-                if (
-                  !Number.isFinite(
-                    lat
-                  ) ||
-                  !Number.isFinite(
-                    lon
-                  )
-                ) {
-                  return null;
-                }
-
-                const completed =
-                  farmer.status ===
-                  "Completed";
-
-                const focused =
-                  String(focus) ===
-                  String(
-                    farmer.cluster
-                  );
-
-                return (
-
-                  <CircleMarker
-                    key={
-                      `farmer-${
-                        farmer.bp
-                      }-${index}`
-                    }
-
-                    center={[
-                      lat,
-                      lon,
-                    ]}
-
-                    radius={
-                      focused
-                        ? 7
-                        : 5
-                    }
-
-                    pathOptions={{
-                      color:
-                        completed
-                          ? "#16845f"
-                          : "#7a867f",
-
-                      fillColor:
-                        completed
-                          ? "#16845f"
-                          : "#ffffff",
-
-                      fillOpacity: 1,
-
-                      weight: 2,
-                    }}
-
-                    eventHandlers={{
-                      click: () =>
-                        setSelected(
-                          farmer
-                        ),
-                    }}
-                  >
-
-                    <Tooltip>
-                      {farmer.name ||
-                        farmer.bp ||
-                        "Farmer"}
-
-                      {" · "}
-
-                      {farmer.status ||
-                        "Pending"}
-                    </Tooltip>
-
-
-                    <Popup>
-
-                      <div className="popup">
-
-                        <small>
-                          FARMER
-                        </small>
-
-                        <h3>
-                          {farmer.name ||
-                            "Unnamed farmer"}
-                        </h3>
-
-                        <code>
-                          {farmer.bp}
-                        </code>
-
-
-                        <div className="popup-grid">
-
-                          <span>
-                            Trader
-                          </span>
-
-                          <b>
-                            {farmer.trader ||
-                              "—"}
-                          </b>
-
-
-                          <span>
-                            Cluster
-                          </span>
-
-                          <b>
-                            {farmer.cluster ||
-                              "—"}
-                          </b>
-
-
-                          <span>
-                            Team
-                          </span>
-
-                          <b>
-                            {farmer.team ||
-                              "—"}
-                          </b>
-
-
-                          <span>
-                            Village
-                          </span>
-
-                          <b>
-                            {farmer.village ||
-                              "—"}
-                          </b>
-
-
-                          <span>
-                            Phone
-                          </span>
-
-                          <b>
-                            {farmer.phone ? (
-                              <a
-                                className="phone-link"
-                                href={`tel:${farmer.phone}`}
-                              >
-                                <Phone
-                                  size={11}
-                                />
-
-                                {
-                                  farmer.phone
-                                }
-                              </a>
-                            ) : (
-                              "—"
-                            )}
-                          </b>
-
-                        </div>
-
-
-                        <div className="popup-actions">
-
-                          {farmer.lat !=
-                            null &&
-                            farmer.lon !=
-                              null && (
-                              <a
-                                className="map-link"
-                                href={mapsUrl(
-                                  farmer.lat,
-                                  farmer.lon
-                                )}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                <MapPinned
-                                  size={13}
-                                />
-
-                                Open in Google Maps
-                              </a>
-                            )}
-
-                        </div>
-
-                      </div>
-
-                    </Popup>
-
-                  </CircleMarker>
-                );
-              }
-            )}
-
-
-            {/* OFFICE */}
-
-            {data.office &&
-              Number.isFinite(
-                Number(
-                  data.office.lat
-                )
-              ) &&
-              Number.isFinite(
-                Number(
-                  data.office.lon
-                )
-              ) && (
-
-                <CircleMarker
-                  center={[
-                    Number(
-                      data.office.lat
-                    ),
-                    Number(
-                      data.office.lon
-                    ),
-                  ]}
-
-                  radius={8}
-
-                  pathOptions={{
-                    color:
-                      "#b23b32",
-
-                    fillColor:
-                      "#b23b32",
-
-                    fillOpacity: 1,
-
-                    weight: 2,
-                  }}
-                >
-
-                  <Tooltip>
-                    {
-                      data.office.name
-                    }
-                  </Tooltip>
-
-                </CircleMarker>
-
-              )}
-
-          </MapContainer>
-
-
-          {/* =================================================
-              LEGEND
-          ================================================= */}
-
-          <div className="legend">
-
-            <span>
-              <i className="done-dot" />
-              Completed farmer
-            </span>
-
-            <span>
-              <i className="pending-dot" />
-              Pending farmer
-            </span>
-
-            <span>
-              <i className="area-dot" />
-              Farmer core area
-            </span>
-
-            <span>
-              ◌ Cluster boundary
-            </span>
-
-            <span>
-              🏠 Office
-            </span>
-
-          </div>
-
-
-          {loading && (
-            <div className="map-loading">
-              Updating…
-            </div>
-          )}
-
-          {error && (
-            <div className="map-error">
-              {error}
-            </div>
-          )}
-
-
-          {/* =================================================
-              SELECTED FARMER DRAWER
-          ================================================= */}
-
-          {selected && (
-
-            <div className="farmer-drawer">
-
-              <button
-                onClick={() =>
-                  setSelected(null)
-                }
-                type="button"
-                title="Close"
-              >
-                <X size={17} />
-              </button>
-
-              <div className="eyebrow">
-                SELECTED FARMER
-              </div>
-
-              <h2>
-                {selected.name ||
-                  "Unnamed farmer"}
-              </h2>
-
-              <code>
-                {selected.bp}
-              </code>
-
-              <span
-                className={`status ${
-                  selected.status ===
-                  "Completed"
-                    ? "done"
-                    : "pending"
-                }`}
-              >
-                {selected.status}
-              </span>
-
-
-              <div className="detail-grid">
-
-                <span>
-                  Trader
-                </span>
-
-                <b>
-                  {selected.trader ||
-                    "—"}
-                </b>
-
-
-                <span>
-                  Cluster
-                </span>
-
-                <b>
-                  {selected.cluster ||
-                    "—"}
-                </b>
-
-
-                <span>
-                  Team
-                </span>
-
-                <b>
-                  {selected.team ||
-                    "—"}
-                </b>
-
-
-                <span>
-                  Employee
-                </span>
-
-                <b>
-                  {selected.employee ||
-                    "—"}
-                </b>
-
-
-                <span>
-                  Day
-                </span>
-
-                <b>
-                  {selected.day ||
-                    "—"}
-                </b>
-
-
-                <span>
-                  Village
-                </span>
-
-                <b>
-                  {selected.village ||
-                    "—"}
-                </b>
-
-
-                <span>
-                  Phone
-                </span>
-
-                <b>
-                  {selected.phone ? (
-                    <a
-                      className="phone-link"
-                      href={`tel:${selected.phone}`}
-                    >
-                      <Phone size={12} />
-                      {
-                        selected.phone
-                      }
-                    </a>
-                  ) : (
-                    "—"
-                  )}
-                </b>
-
-
-                <span>
-                  Location
-                </span>
-
-                <b>
-                  {selected.lat !=
-                    null &&
-                  selected.lon !=
-                    null ? (
-                    <a
-                      className="map-link"
-                      href={mapsUrl(
-                        selected.lat,
-                        selected.lon
-                      )}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <MapPinned
-                        size={13}
-                      />
-                      Google Maps
-                    </a>
-                  ) : (
-                    "—"
-                  )}
-                </b>
-
-
-                <span>
-                  Remarks
-                </span>
-
-                <b>
-                  {selected.remarks ||
-                    "—"}
-                </b>
-
-
-                {selected.status ===
-                  "Completed" &&
-                  selected.completion_date && (
-                    <>
-                      <span>
-                        Completed
-                      </span>
-
-                      <b>
-                        {new Date(
-                          selected.completion_date
-                        ).toLocaleString()}
-                      </b>
-                    </>
-                  )}
-
-              </div>
-
-            </div>
-          )}
-
-        </section>
-
+            <Navigation size={13} /> Navigate
+          </a>
+        ) : null}
+        {farmer.lat != null && farmer.lon != null ? (
+          <a className="popup-action map-link" href={mapsUrl(farmer.lat, farmer.lon)} target="_blank" rel="noreferrer">
+            <MapPinned size={13} /> Google Maps
+          </a>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function pct(value) {
-  return Math.max(
-    0,
-    Math.min(
-      100,
-      Number(value) || 0
-    )
+export default function ClusterMap() {
+  const [data, setData] = useState({ farmers: [], office: null });
+  const [team, setTeam] = useState([]);
+  const [myLocation, setMyLocation] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshingTeam, setRefreshingTeam] = useState(false);
+  const [error, setError] = useState("");
+  const watchId = useRef(null);
+  const lastSentAt = useRef(0);
+
+  const loadMap = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.openMap();
+      setData({ farmers: result.farmers || [], office: result.office || null });
+      setTeam(result.teamMembers || []);
+    } catch (e) {
+      setError(e?.message || "Unable to load map.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadTeam = async () => {
+    try {
+      setRefreshingTeam(true);
+      const result = await api.teamLocations();
+      setTeam(result.users || []);
+    } catch (e) {
+      // Don't blank the map because a team refresh temporarily fails.
+      console.warn("Team location refresh failed:", e);
+    } finally {
+      setRefreshingTeam(false);
+    }
+  };
+
+  const sendMyLocation = async (position) => {
+    const next = {
+      lat: position.coords.latitude,
+      lon: position.coords.longitude,
+      accuracy: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
+      updatedAt: new Date().toISOString(),
+    };
+    setMyLocation(next);
+
+    if (Date.now() - lastSentAt.current < LOCATION_SEND_MS) return;
+    lastSentAt.current = Date.now();
+    try {
+      await api.updateTeamLocation({
+        latitude: next.lat,
+        longitude: next.lon,
+        accuracy: next.accuracy,
+      });
+    } catch (e) {
+      console.warn("Unable to share current location:", e);
+    }
+  };
+
+  useEffect(() => {
+    loadMap();
+
+    const teamTimer = setInterval(loadTeam, TEAM_REFRESH_MS);
+
+    if (navigator.geolocation) {
+      watchId.current = navigator.geolocation.watchPosition(
+        sendMyLocation,
+        (geoError) => console.warn("Location unavailable:", geoError?.message),
+        { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+      );
+    }
+
+    return () => {
+      clearInterval(teamTimer);
+      if (watchId.current != null) navigator.geolocation?.clearWatch(watchId.current);
+    };
+  }, []);
+
+  const farmers = useMemo(
+    () => data.farmers.filter((f) => Number.isFinite(Number(f.lat)) && Number.isFinite(Number(f.lon))),
+    [data.farmers]
+  );
+
+  const completed = useMemo(() => farmers.filter((f) => f.status === "Completed").length, [farmers]);
+  const pending = farmers.length - completed;
+  const mappedTeam = useMemo(() => team.filter((u) => u.location && Number.isFinite(Number(u.location.latitude)) && Number.isFinite(Number(u.location.longitude))), [team]);
+
+  return (
+    <div className="open-map-page">
+      <div className="open-map-toolbar">
+        <Link to="/" className="back-link"><ArrowLeft size={17} /> Dashboard</Link>
+        <div className="open-map-title">
+          <div className="eyebrow">FIELD OPERATIONS</div>
+          <h1>Open Map</h1>
+        </div>
+        <div className="open-map-kpis">
+          <span><b>{farmers.length}</b> Farmers</span>
+          <span className="kpi-done"><b>{completed}</b> Completed</span>
+          <span className="kpi-pending"><b>{pending}</b> Pending</span>
+          <span className="kpi-team"><b>{mappedTeam.length}</b> Team live</span>
+        </div>
+        <button className="open-map-refresh" type="button" onClick={() => { loadMap(); loadTeam(); }} title="Refresh map data">
+          <RefreshCw size={16} className={refreshingTeam ? "spin" : ""} />
+        </button>
+      </div>
+
+      <section className="open-map-canvas">
+        <MapContainer center={CENTER} zoom={10} className="leaflet-map" preferCanvas zoomControl>
+          <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          <FitOnce points={farmers} />
+          <LocateControl />
+          <FullscreenControl />
+          <RecenterControl location={myLocation} />
+
+          {farmers.map((farmer) => {
+            const done = farmer.status === "Completed";
+            return (
+              <CircleMarker
+                key={`farmer-${farmer.bp}`}
+                center={[Number(farmer.lat), Number(farmer.lon)]}
+                radius={done ? 7 : 7.5}
+                pathOptions={{
+                  color: done ? "#147a54" : "#c64035",
+                  fillColor: done ? "#20a56f" : "#e05245",
+                  fillOpacity: 0.9,
+                  weight: 2,
+                }}
+              >
+                <Tooltip direction="top" offset={[0, -7]}>{farmer.name || farmer.bp}</Tooltip>
+                <Popup><FarmerPopup farmer={farmer} myLocation={myLocation} /></Popup>
+              </CircleMarker>
+            );
+          })}
+
+          {mappedTeam.map((member) => {
+            const lat = Number(member.location.latitude);
+            const lon = Number(member.location.longitude);
+            const fresh = Date.now() - new Date(member.location.created_at).getTime() < 2 * 60 * 1000;
+            return (
+              <CircleMarker
+                key={`team-${member.user_id}`}
+                center={[lat, lon]}
+                radius={9}
+                pathOptions={{
+                  color: fresh ? "#7144a5" : "#8d8d8d",
+                  fillColor: fresh ? "#9c62d2" : "#a6aaa8",
+                  fillOpacity: 0.95,
+                  weight: 3,
+                }}
+              >
+                <Tooltip direction="top" offset={[0, -8]}>{member.full_name || member.email}</Tooltip>
+                <Popup>
+                  <div className="popup">
+                    <small>TEAM MEMBER</small>
+                    <h3>{member.full_name || member.email}</h3>
+                    <div className="popup-grid">
+                      <span>Team</span><b>{member.team || "—"}</b>
+                      <span>Status</span><b>{fresh ? "Live" : "Stale"}</b>
+                      <span>Last location</span><b>{ageLabel(member.location.created_at)}</b>
+                    </div>
+                    <div className="popup-actions">
+                      <a className="popup-action map-link" href={directionsUrl(lat, lon, myLocation)} target="_blank" rel="noreferrer"><Navigation size={13} /> Navigate</a>
+                    </div>
+                  </div>
+                </Popup>
+              </CircleMarker>
+            );
+          })}
+
+          {myLocation && (
+            <>
+              {myLocation.accuracy && <Circle center={[myLocation.lat, myLocation.lon]} radius={myLocation.accuracy} pathOptions={{ color: "#2879d0", fillColor: "#2879d0", fillOpacity: 0.08, weight: 1 }} />}
+              <CircleMarker center={[myLocation.lat, myLocation.lon]} radius={10} pathOptions={{ color: "#0b5fb3", fillColor: "#2389e5", fillOpacity: 1, weight: 3 }}>
+                <Tooltip direction="top" offset={[0, -9]}>My location</Tooltip>
+                <Popup><div className="popup"><small>MY LOCATION</small><h3>You are here</h3><div className="popup-grid"><span>Accuracy</span><b>{myLocation.accuracy ? `±${Math.round(myLocation.accuracy)} m` : "—"}</b><span>Updated</span><b>{ageLabel(myLocation.updatedAt)}</b></div></div></Popup>
+              </CircleMarker>
+            </>
+          )}
+
+          {data.office && Number.isFinite(Number(data.office.lat)) && Number.isFinite(Number(data.office.lon)) && (
+            <CircleMarker center={[Number(data.office.lat), Number(data.office.lon)]} radius={7} pathOptions={{ color: "#5b5b5b", fillColor: "#626b68", fillOpacity: 1, weight: 2 }}>
+              <Tooltip>{data.office.name || "Office/Base"}</Tooltip>
+            </CircleMarker>
+          )}
+        </MapContainer>
+
+        <div className="open-map-legend">
+          <span><i className="legend-pending" /> Pending</span>
+          <span><i className="legend-completed" /> Completed</span>
+          <span><i className="legend-me" /> My location</span>
+          <span><i className="legend-team" /> Team member</span>
+          <span><i className="legend-office" /> Office</span>
+        </div>
+
+        <div className="open-map-status">
+          <span><CheckCircle2 size={14} /> {completed} completed</span>
+          <span><Clock3 size={14} /> {pending} pending</span>
+          <span><Users size={14} /> {mappedTeam.length} team locations</span>
+        </div>
+
+        {loading && <div className="open-map-loading">Loading map…</div>}
+        {error && <div className="open-map-error"><span>{error}</span><button type="button" onClick={loadMap}><RefreshCw size={13} /> Retry</button><button type="button" onClick={() => setError("")}><X size={13} /></button></div>}
+      </section>
+    </div>
   );
 }

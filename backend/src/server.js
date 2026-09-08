@@ -88,6 +88,21 @@ const OFFICE = {
 */
 const DB_PAGE_SIZE = 1000;
 
+// Short-lived in-memory caches keep the existing workflow/UI intact while
+// avoiding repeated Supabase reads for every filter/search request.
+const DATA_CACHE_TTL_MS = 30000;
+let farmersCache = { at: 0, data: null };
+let clusterPointsCache = { at: 0, data: null };
+let masterFieldsCache = null;
+const authCache = new Map();
+const AUTH_CACHE_TTL_MS = 30000;
+
+function invalidateDataCache() {
+  farmersCache = { at: 0, data: null };
+  clusterPointsCache = { at: 0, data: null };
+}
+
+
 /* =======================================================
    DEMO DATA
 ======================================================= */
@@ -711,6 +726,7 @@ async function fetchAllRows(
 ======================================================= */
 
 function bundledMasterFields() {
+  if (masterFieldsCache) return masterFieldsCache;
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
     const candidates = [
@@ -758,6 +774,7 @@ function bundledMasterFields() {
       });
     });
 
+    masterFieldsCache = byBp;
     return byBp;
   } catch (error) {
     console.warn("Master-sheet display fallback unavailable:", error.message);
@@ -765,7 +782,7 @@ function bundledMasterFields() {
   }
 }
 
-async function allFarmers() {
+async function allFarmersFromDb() {
   /* -------------------------------
      DEMO MODE
   ------------------------------- */
@@ -902,11 +919,23 @@ async function allFarmers() {
   });
 }
 
+/* Cached farmer dataset. Filters are still applied exactly as before,
+   but repeated requests within 30 seconds do not hit Supabase. */
+async function allFarmers() {
+  const now = Date.now();
+  if (farmersCache.data && now - farmersCache.at < DATA_CACHE_TTL_MS) {
+    return farmersCache.data;
+  }
+  const data = await allFarmersFromDb();
+  farmersCache = { at: now, data };
+  return data;
+}
+
 /* =======================================================
    ALL CLUSTER POINTS
 ======================================================= */
 
-async function allClusterPoints() {
+async function allClusterPointsFromDb() {
   if (!hasDb) {
     return demoClusterPoints;
   }
@@ -932,6 +961,16 @@ async function allClusterPoints() {
 
     color: clean(x.color),
   }));
+}
+
+async function allClusterPoints() {
+  const now = Date.now();
+  if (clusterPointsCache.data && now - clusterPointsCache.at < DATA_CACHE_TTL_MS) {
+    return clusterPointsCache.data;
+  }
+  const data = await allClusterPointsFromDb();
+  clusterPointsCache = { at: now, data };
+  return data;
 }
 
 /* =======================================================
@@ -1758,28 +1797,42 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ error: "Authentication required." });
     }
 
-    const { data, error } = await supabase.auth.getUser(token);
+    const now = Date.now();
+    const cached = authCache.get(token);
+    let user = cached && cached.expiresAt > now ? cached.user : null;
+    let profile = cached && cached.expiresAt > now ? cached.profile : null;
 
-    if (error || !data?.user) {
-      return res.status(401).json({ error: "Invalid or expired login session." });
+    if (!user || !profile) {
+      const { data, error } = await supabase.auth.getUser(token);
+      if (error || !data?.user) {
+        authCache.delete(token);
+        return res.status(401).json({ error: "Invalid or expired login session." });
+      }
+      user = data.user;
+      profile = await getProfile(user);
+      authCache.set(token, { user, profile, expiresAt: Date.now() + AUTH_CACHE_TTL_MS, activityAt: 0 });
     }
-
-    const profile = await getProfile(data.user);
 
     if (!profile || profile.is_active === false) {
       return res.status(403).json({ error: "This account is disabled." });
     }
 
     req.user = {
-      ...data.user,
+      ...user,
       profile,
     };
 
-    /* Lightweight activity heartbeat. */
-    await supabase
-      .from("profiles")
-      .update({ last_seen_at: new Date().toISOString() })
-      .eq("user_id", data.user.id);
+    /* Lightweight activity heartbeat, throttled so frequent map polling
+       does not turn every read into a database write. */
+    const entry = authCache.get(token);
+    const shouldTouch = !entry || !entry.activityAt || now - entry.activityAt >= 120000;
+    if (shouldTouch) {
+      await supabase
+        .from("profiles")
+        .update({ last_seen_at: new Date().toISOString() })
+        .eq("user_id", user.id);
+      if (entry) entry.activityAt = now;
+    }
 
     next();
   } catch (e) {
@@ -2011,15 +2064,8 @@ app.get(
   "/api/farmers",
   async (req, res) => {
     try {
-      const all =
-        await allFarmers();
-
-      const rows =
-        applyFilters(
-          all,
-          req.query
-        );
-
+      const all = await allFarmers();
+      const rows = applyFilters(all, req.query);
       const statusBase = applyFilters(all, { ...req.query, status: "" });
       const statusCounts = {
         all: statusBase.length,
@@ -2027,33 +2073,23 @@ app.get(
         pending: statusBase.filter((r) => r.status === "Pending").length,
       };
 
+      const pageSize = Math.min(Math.max(Number.parseInt(req.query.page_size, 10) || 40, 1), 100);
+      const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+      const start = (page - 1) * pageSize;
+
       res.json({
-        farmers: rows,
-
-        total:
-          rows.length,
-
+        farmers: rows.slice(start, start + pageSize),
+        total: rows.length,
+        page,
+        pageSize,
+        totalPages: Math.max(1, Math.ceil(rows.length / pageSize)),
         statusCounts,
-
-        options:
-          options(all),
-
-        /*
-          This should now show
-          1167 instead of 1000.
-        */
-        allTotal:
-          all.length,
+        options: options(all),
+        allTotal: all.length,
       });
     } catch (e) {
-      console.error(
-        "Farmers error:",
-        e
-      );
-
-      res.status(500).json({
-        error: e.message,
-      });
+      console.error("Farmers error:", e);
+      res.status(500).json({ error: e.message });
     }
   }
 );
@@ -2320,6 +2356,93 @@ app.get(
 );
 
 /* =======================================================
+   OPEN MAP
+
+   Lightweight map payload: no cluster polygons, cluster lists or
+   filter options. Farmer status is still resolved from the same
+   existing dataset, while team positions are returned separately.
+======================================================= */
+
+app.get(
+  "/api/open-map",
+  async (req, res) => {
+    try {
+      const all = await allFarmers();
+
+      const farmers = all
+        .filter((r) => r.lat !== null && r.lon !== null)
+        .map((r) => ({
+          bp: r.bp,
+          name: r.name,
+          name_in_bpm: r.name_in_bpm,
+          farm_name: r.farm_name,
+          area_under_rejuvenation: r.area_under_rejuvenation,
+          phone: r.phone,
+          village: r.village,
+          trader: r.trader,
+          cluster: r.cluster,
+          team: r.team,
+          employee: r.employee,
+          day: r.day,
+          lat: r.lat,
+          lon: r.lon,
+          status: r.status,
+          completion_date: r.completion_date,
+          remarks: r.remarks,
+        }));
+
+      let teamMembers = [];
+      if (hasDb) {
+        const { data: users, error: usersError } = await supabase
+          .from("profiles")
+          .select("id,user_id,email,full_name,team,role,is_active,last_seen_at")
+          .eq("is_active", true)
+          .order("full_name", { ascending: true });
+        if (usersError) throw new Error(usersError.message);
+
+        const { data: locations, error: locError } = await supabase
+          .from("team_locations")
+          .select("id,user_id,latitude,longitude,accuracy,created_at")
+          .order("created_at", { ascending: false })
+          .limit(500);
+        if (locError) throw new Error(locError.message);
+
+        const latest = new Map();
+        (locations || []).forEach((x) => {
+          if (!latest.has(x.user_id)) latest.set(x.user_id, x);
+        });
+
+        teamMembers = (users || []).map((u) => ({
+        id: u.id,
+        user_id: u.user_id,
+        email: u.email,
+        full_name: u.full_name,
+        team: u.team,
+        role: u.role,
+        last_seen_at: u.last_seen_at,
+          location: latest.get(u.user_id) || null,
+        }));
+      }
+
+      res.json({
+        farmers,
+        teamMembers,
+        office: OFFICE,
+        totals: {
+          farmers: farmers.length,
+          completed: farmers.filter((r) => r.status === "Completed").length,
+          pending: farmers.filter((r) => r.status !== "Completed").length,
+          team: teamMembers.filter((u) => u.location).length,
+        },
+      });
+    } catch (e) {
+      console.error("Open map error:", e);
+      res.status(500).json({ error: e.message || "Open map failed." });
+    }
+  }
+);
+
+/* =======================================================
    CLUSTER POINTS
 ======================================================= */
 
@@ -2448,6 +2571,7 @@ app.post(
         }
       }
 
+      invalidateDataCache();
       await audit(req.user, completed ? "visit_completed" : "visit_reopened", {
         entity_type: "farmer",
         entity_id: bp,
@@ -2730,6 +2854,7 @@ app.post(
           batch.length;
       }
 
+      invalidateDataCache();
       await audit(req.user, "farmer_dataset_imported", {
         entity_type: "farmer_dataset",
         payload: { imported, file_name: req.file.originalname },
@@ -2862,6 +2987,8 @@ app.post(
           chunk.length;
       }
 
+      clusterPointsCache = { at: 0, data: null };
+      invalidateDataCache();
       await audit(req.user, "cluster_map_imported", {
         entity_type: "cluster_map",
         payload: { imported, file_name: req.file.originalname, office: parsed.office },
@@ -2919,6 +3046,7 @@ app.delete(
         );
       }
 
+      clusterPointsCache = { at: 0, data: null };
       await audit(req.user, "cluster_map_cleared", {
         entity_type: "cluster_map",
         payload: { source: "Cluster_Map.html" },
@@ -2941,15 +3069,8 @@ app.delete(
 app.get("/api/auth/me", async (req, res) => {
   try {
     if (!hasDb) return res.status(503).json({ error: "Supabase Auth is not configured." });
-    const header = req.headers.authorization || "";
-    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (!token) return res.status(401).json({ error: "Authentication required." });
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data?.user) return res.status(401).json({ error: "Invalid or expired login session." });
-    const profile = await getProfile(data.user);
-    if (!profile || profile.is_active === false) return res.status(403).json({ error: "This account is disabled." });
-    await supabase.from("profiles").update({ last_seen_at: new Date().toISOString() }).eq("user_id", data.user.id);
-    res.json({ user: { id: data.user.id, email: data.user.email }, profile });
+    if (!req.user) return res.status(401).json({ error: "Authentication required." });
+    res.json({ user: { id: req.user.id, email: req.user.email }, profile: req.user.profile });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
