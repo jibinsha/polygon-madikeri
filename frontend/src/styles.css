@@ -155,7 +155,7 @@
 .open-map-page{height:calc(100dvh - 55px);display:flex;flex-direction:column;overflow:hidden;background:#eef3f0}.open-map-toolbar{background:#fff;border-bottom:1px solid #dfe7e2;min-height:64px;padding:8px 14px;display:flex;align-items:center;gap:14px;z-index:20;flex:none}.open-map-title{min-width:150px}.open-map-title h1{font-size:20px;line-height:1.1;margin:2px 0 0}.open-map-kpis{display:flex;align-items:center;gap:7px;flex:1;justify-content:flex-end;flex-wrap:wrap}.open-map-kpis span{display:flex;align-items:center;gap:5px;border:1px solid #e1e8e4;background:#fafcfb;border-radius:999px;padding:6px 9px;font-size:9px;color:#69776f}.open-map-kpis b{font-size:12px;color:#293b32}.open-map-kpis .kpi-done b{color:#147a54}.open-map-kpis .kpi-pending b{color:#c64035}.open-map-kpis .kpi-team b{color:#7144a5}.open-map-refresh{width:36px;height:36px;border:1px solid #d9e2dd;background:#fff;border-radius:9px;display:grid;place-items:center;cursor:pointer;color:#395249;flex:none}.open-map-refresh:hover{background:#f4f8f5}.open-map-canvas{position:relative;flex:1;min-height:0;overflow:hidden}.open-map-canvas>.leaflet-map{position:absolute;inset:0;width:100%;height:100%;min-height:0}.open-map-canvas .leaflet-control-zoom{margin-top:12px;margin-left:12px}.open-map-canvas .map-control{position:absolute;right:13px;top:13px;z-index:1000}.open-map-canvas .map-control.second{top:57px}.open-map-canvas .map-control.third{top:101px}.open-map-canvas .map-control:disabled{opacity:.45;cursor:not-allowed}.open-map-legend{position:absolute;left:13px;bottom:14px;z-index:900;background:rgba(255,255,255,.96);border:1px solid #dfe7e2;border-radius:10px;padding:8px 10px;display:flex;gap:10px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.12);font-size:9px;color:#526159}.open-map-legend span{display:flex;align-items:center;gap:5px}.open-map-legend i{width:9px;height:9px;border-radius:50%;display:block;flex:none}.legend-pending{background:#e05245;border:2px solid #c64035}.legend-completed{background:#20a56f;border:2px solid #147a54}.legend-me{background:#2389e5;border:2px solid #0b5fb3}.legend-team{background:#9c62d2;border:2px solid #7144a5}.legend-office{background:#626b68;border:2px solid #4d5552}.open-map-status{position:absolute;right:13px;bottom:14px;z-index:900;background:rgba(255,255,255,.96);border:1px solid #dfe7e2;border-radius:10px;padding:7px 9px;display:flex;gap:9px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.12);font-size:8px;color:#637069}.open-map-status span{display:flex;align-items:center;gap:4px}.open-map-loading{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:1100;background:#fff;border:1px solid #dfe7e2;border-radius:999px;padding:7px 11px;box-shadow:0 2px 10px rgba(0,0,0,.12);font-size:9px;color:#53625a}.open-map-error{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:1200;max-width:calc(100% - 30px);display:flex;align-items:center;gap:7px;background:#fff4f2;border:1px solid #e4bcb6;color:#8b453d;border-radius:10px;padding:7px 9px;box-shadow:0 2px 10px rgba(0,0,0,.12);font-size:9px}.open-map-error span{max-width:420px;overflow:hidden;text-overflow:ellipsis}.open-map-error button{border:0;background:transparent;color:inherit;display:grid;place-items:center;cursor:pointer}.farmer-map-popup{min-width:220px}.farmer-map-popup>.status{margin:8px 0 3px}.popup-remarks{margin-top:8px;padding-top:8px;border-top:1px solid #edf1ee;display:grid;gap:3px;font-size:9px}.popup-remarks span{color:#7b8780}.popup-remarks b{font-weight:500;color:#45554d;white-space:normal;word-break:break-word}.popup-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.popup-action{display:inline-flex;align-items:center;justify-content:center;gap:5px;text-decoration:none;border:1px solid #d7e3dc;border-radius:7px;padding:6px 8px;font-size:9px;font-weight:700;background:#f8fbf9;color:#2b624a}.phone-action{color:#147a54;background:#edf8f2}.map-link{color:#286247}
 @keyframes openMapSpin{to{transform:rotate(360deg)}}.spin{animation:openMapSpin .9s linear infinite}
 
-@media(max-width:900px){.open-map-page{height:calc(100dvh - 55px);min-height:0}.open-map-toolbar{padding:7px 10px;gap:8px;flex-wrap:wrap}.open-map-title{order:1;flex:1;min-width:130px}.open-map-title h1{font-size:18px}.open-map-toolbar>.back-link{order:0}.open-map-kpis{display:none;}.open-map-kpis::-webkit-scrollbar{display:none}.open-map-kpis span{white-space:nowrap}.open-map-refresh{order:2}.open-map-legend{left:8px;right:8px;bottom:8px;font-size:8px;gap:7px;padding:7px 8px}.open-map-status{left:8px;right:8px;bottom:57px;justify-content:flex-start;font-size:8px}.open-map-error{top:9px}.open-map-canvas .map-control{right:8px}}
+@media(max-width:900px){.open-map-page{height:calc(100dvh - 55px);min-height:0}.open-map-toolbar{padding:7px 10px;gap:8px;flex-wrap:wrap}.open-map-title{order:1;flex:1;min-width:130px}.open-map-title h1{font-size:18px}.open-map-toolbar>.back-link{order:0}.open-map-kpis{order:3;width:100%;justify-content:flex-start;overflow-x:auto;flex-wrap:nowrap;padding-bottom:1px;scrollbar-width:none}.open-map-kpis::-webkit-scrollbar{display:none}.open-map-kpis span{white-space:nowrap}.open-map-refresh{order:2}.open-map-legend{left:8px;right:8px;bottom:8px;font-size:8px;gap:7px;padding:7px 8px}.open-map-status{left:8px;right:8px;bottom:57px;justify-content:flex-start;font-size:8px}.open-map-error{top:9px}.open-map-canvas .map-control{right:8px}}
 @media(max-width:520px){.open-map-page{height:calc(100dvh - 55px)}.open-map-toolbar>.back-link{font-size:10px}.open-map-title{min-width:0}.open-map-kpis span{padding:5px 7px;font-size:8px}.open-map-kpis b{font-size:11px}.open-map-canvas .leaflet-control-zoom{margin-top:8px;margin-left:8px}.open-map-legend{max-width:calc(100% - 16px)}.open-map-status{bottom:64px}.farmer-map-popup{min-width:200px}.popup-actions{display:grid;grid-template-columns:1fr 1fr}.popup-action:last-child{grid-column:1/-1}}
 
 /* =====================================================
@@ -167,3 +167,56 @@
 .farmer-popup-details b{white-space:normal;word-break:break-word}
 .legend-team{background:#9c62d2;border:2px solid #7144a5}
 .online.offline{color:#9a6a20}.online.offline i{background:#d99b35}
+
+
+/* =====================================================
+   PRIVATE FARMER GROUPS + OPEN MAP FILTERS
+===================================================== */
+.farmer-groups-card{margin-bottom:11px;padding:13px 14px}
+.farmer-groups-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.farmer-groups-head h2{display:flex;align-items:center;gap:6px;font-size:14px;margin:2px 0}
+.farmer-groups-head p{font-size:9px;color:#7a867f;margin:3px 0 0}
+.farmer-group-list{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:11px}
+.farmer-group-chip-wrap{display:flex;align-items:center;border:1px solid #dce5df;border-radius:999px;background:#fff;overflow:hidden}
+.farmer-group-chip-wrap.active{border-color:#91b6a1;background:#f2f8f4}
+.farmer-group-chip{border:0;background:transparent;padding:7px 9px;font-size:9px;color:#365247;cursor:pointer}
+.farmer-group-chip b{margin-left:4px;color:#7a867f}
+.farmer-group-chip-wrap.active .farmer-group-chip{color:#216344;font-weight:800}
+.farmer-group-delete{width:28px;height:28px;border:0;border-left:1px solid #e5ebe7;background:transparent;color:#9a625a;display:grid;place-items:center;cursor:pointer}
+.group-muted{font-size:9px;color:#89958f}
+.group-error{margin-top:9px;padding:8px 10px;border-radius:8px;background:#fff3f1;border:1px solid #efd4cf;color:#934b42;font-size:9px}
+.farmer-selection-bar{display:flex;align-items:center;gap:7px;margin:0 0 9px;padding:9px 11px;border:1px solid #cfe1d6;background:#f1f8f4;border-radius:10px;color:#355448;font-size:9px}
+.farmer-selection-bar span{margin-right:auto}
+.farmer-selection-bar .primary-btn,.farmer-selection-bar .secondary-btn{min-height:32px;padding:6px 9px}
+.farmer-card-select{display:flex;align-items:flex-start;gap:9px}
+.farmer-card-select input{width:17px;height:17px;margin:3px 0 0;accent-color:#176b49;flex:none}
+.farmer-group-modal{position:relative}
+.group-modal-close{position:absolute;right:10px;top:10px;width:30px;height:30px;border:0;background:#f4f7f5;border-radius:8px;display:grid;place-items:center;color:#63736b;cursor:pointer}
+.group-name-input{width:100%;border:1px solid #dce5df;border-radius:9px;padding:11px 12px;outline:none;font:inherit;margin-top:8px}
+.group-name-input:focus{border-color:#347054;box-shadow:0 0 0 3px #edf5f0}
+.open-map-filters{background:#fff;border-bottom:1px solid #dfe7e2;padding:7px 14px;display:flex;align-items:center;gap:7px;flex:none;z-index:15}
+.open-map-bp-search{display:flex;align-items:center;gap:6px;border:1px solid #d9e2dd;border-radius:9px;height:36px;padding:0 9px;min-width:230px;flex:1;max-width:360px;background:#fff;color:#6b7971}
+.open-map-bp-search input{border:0;outline:0;width:100%;font-size:10px;background:transparent}
+.open-map-bp-search button{border:0;background:none;color:#718078;display:grid;place-items:center;padding:2px;cursor:pointer}
+.open-map-filters select{height:36px;border:1px solid #d9e2dd;border-radius:9px;background:#fff;padding:0 10px;font-size:10px;color:#37463e;min-width:145px;max-width:220px}
+@media(max-width:900px){
+  .farmer-groups-head{align-items:flex-start}
+  .farmer-groups-head .primary-btn{white-space:nowrap}
+  .farmer-group-list{overflow-x:auto;flex-wrap:nowrap;padding-bottom:2px;scrollbar-width:none}
+  .farmer-group-list::-webkit-scrollbar{display:none}
+  .farmer-group-chip-wrap,.farmer-group-chip{white-space:nowrap}
+  .farmer-selection-bar{flex-wrap:wrap}
+  .farmer-selection-bar span{width:100%;margin-right:0}
+  .open-map-filters{padding:7px 9px;display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .open-map-bp-search{grid-column:1/-1;min-width:0;max-width:none}
+  .open-map-filters select{width:100%;min-width:0;max-width:none}
+}
+@media(max-width:520px){
+  .farmer-groups-head h2{font-size:13px}
+  .farmer-groups-head p{max-width:190px}
+  .farmer-groups-head .primary-btn{font-size:9px;padding:8px 9px}
+  .farmer-selection-bar .primary-btn,.farmer-selection-bar .secondary-btn{flex:1}
+  .open-map-filters{grid-template-columns:1fr}
+  .open-map-filters select{height:38px}
+  .open-map-bp-search{height:38px}
+}

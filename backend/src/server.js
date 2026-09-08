@@ -1007,7 +1007,7 @@ function unique(a) {
    FILTER FARMERS
 ======================================================= */
 
-function applyFilters(rows, q = {}) {
+function applyFilters(rows, q = {}, groupBps = null) {
   const trader = clean(q.trader).toUpperCase();
   const team = clean(q.team);
   const day = clean(q.day);
@@ -1025,6 +1025,7 @@ function applyFilters(rows, q = {}) {
   const search = clean(q.q).toLowerCase();
 
   return rows.filter((r) => {
+    if (groupBps && !groupBps.has(r.bp)) return false;
     if (
       trader &&
       r.trader !== trader
@@ -1880,6 +1881,170 @@ app.get(
 app.use("/api", requireAuth);
 
 /* =======================================================
+   PRIVATE FARMER GROUPS
+   Groups belong to the signed-in account. They contain BP
+   numbers only, so live farmer data/status always stays current.
+======================================================= */
+
+async function getOwnedGroup(groupId, userId) {
+  if (!hasDb) return null;
+  const { data, error } = await supabase
+    .from("farmer_groups")
+    .select("id,name,user_id,created_at,updated_at")
+    .eq("id", groupId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data || null;
+}
+
+async function getOwnedGroupBps(groupId, userId) {
+  const group = await getOwnedGroup(groupId, userId);
+  if (!group) {
+    const error = new Error("Group not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+  const { data, error } = await supabase
+    .from("farmer_group_members")
+    .select("bp_number")
+    .eq("group_id", groupId);
+  if (error) throw new Error(error.message);
+  return { group, bps: (data || []).map((x) => clean(x.bp_number)).filter(Boolean) };
+}
+
+app.get("/api/farmer-groups", async (req, res) => {
+  try {
+    if (!hasDb) return res.json({ groups: [] });
+    const { data: groups, error: groupError } = await supabase
+      .from("farmer_groups")
+      .select("id,name,user_id,created_at,updated_at")
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: true });
+    if (groupError) throw new Error(groupError.message);
+
+    const ids = (groups || []).map((g) => g.id);
+    let members = [];
+    if (ids.length) {
+      const { data, error } = await supabase
+        .from("farmer_group_members")
+        .select("group_id,bp_number")
+        .in("group_id", ids);
+      if (error) throw new Error(error.message);
+      members = data || [];
+    }
+
+    const byGroup = new Map();
+    members.forEach((m) => {
+      const list = byGroup.get(m.group_id) || [];
+      list.push(clean(m.bp_number));
+      byGroup.set(m.group_id, list);
+    });
+
+    res.json({
+      groups: (groups || []).map((g) => ({
+        id: g.id,
+        name: g.name,
+        farmer_bps: byGroup.get(g.id) || [],
+        count: (byGroup.get(g.id) || []).length,
+        created_at: g.created_at,
+        updated_at: g.updated_at,
+      })),
+    });
+  } catch (e) {
+    console.error("Farmer groups error:", e);
+    res.status(e.statusCode || 500).json({ error: e.message || "Unable to load groups." });
+  }
+});
+
+app.post("/api/farmer-groups", async (req, res) => {
+  try {
+    if (!hasDb) return res.status(503).json({ error: "Groups require Supabase configuration." });
+
+    const name = clean(req.body?.name);
+    const bps = [...new Set((Array.isArray(req.body?.farmer_bps) ? req.body.farmer_bps : [])
+      .map(clean).filter(Boolean))];
+
+    if (!name) return res.status(400).json({ error: "Group name is required." });
+    if (!bps.length) return res.status(400).json({ error: "Select at least one farmer." });
+    if (name.length > 100) return res.status(400).json({ error: "Group name is too long." });
+
+    const { data: farmers, error: farmerError } = await supabase
+      .from("farmers")
+      .select("bp_number")
+      .in("bp_number", bps);
+    if (farmerError) throw new Error(farmerError.message);
+
+    const validBps = [...new Set((farmers || []).map((x) => clean(x.bp_number)).filter(Boolean))];
+    if (!validBps.length) return res.status(400).json({ error: "None of the selected BP numbers were found." });
+
+    const { data: group, error: groupError } = await supabase
+      .from("farmer_groups")
+      .insert({ user_id: req.user.id, name })
+      .select("id,name,created_at,updated_at")
+      .single();
+
+    if (groupError) {
+      if (groupError.code === "23505") return res.status(409).json({ error: "You already have a group with this name." });
+      throw new Error(groupError.message);
+    }
+
+    const { error: memberError } = await supabase
+      .from("farmer_group_members")
+      .insert(validBps.map((bp) => ({ group_id: group.id, bp_number: bp })));
+
+    if (memberError) {
+      await supabase.from("farmer_groups").delete().eq("id", group.id).eq("user_id", req.user.id);
+      throw new Error(memberError.message);
+    }
+
+    audit(req.user, "farmer_group_created", {
+      entity_type: "farmer_group",
+      entity_id: String(group.id),
+      payload: { name, farmer_bps: validBps, count: validBps.length },
+    }).catch(() => {});
+
+    res.status(201).json({
+      ok: true,
+      group: { ...group, farmer_bps: validBps, count: validBps.length },
+    });
+  } catch (e) {
+    console.error("Create farmer group error:", e);
+    res.status(e.statusCode || 500).json({ error: e.message || "Unable to create group." });
+  }
+});
+
+app.delete("/api/farmer-groups/:id", async (req, res) => {
+  try {
+    if (!hasDb) return res.status(503).json({ error: "Groups require Supabase configuration." });
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid group." });
+
+    const group = await getOwnedGroup(id, req.user.id);
+    if (!group) return res.status(404).json({ error: "Group not found." });
+
+    const { error } = await supabase
+      .from("farmer_groups")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", req.user.id);
+    if (error) throw new Error(error.message);
+
+    audit(req.user, "farmer_group_deleted", {
+      entity_type: "farmer_group",
+      entity_id: String(id),
+      payload: { name: group.name },
+    }).catch(() => {});
+
+    res.json({ ok: true, id });
+  } catch (e) {
+    console.error("Delete farmer group error:", e);
+    res.status(500).json({ error: e.message || "Unable to delete group." });
+  }
+});
+
+
+/* =======================================================
    DASHBOARD
 ======================================================= */
 
@@ -1915,8 +2080,13 @@ app.get(
   async (req, res) => {
     try {
       const all = await allFarmers();
-      const rows = applyFilters(all, req.query);
-      const statusBase = applyFilters(all, { ...req.query, status: "" });
+      let groupBps = null;
+      if (clean(req.query.group_id)) {
+        const result = await getOwnedGroupBps(Number.parseInt(req.query.group_id, 10), req.user.id);
+        groupBps = new Set(result.bps);
+      }
+      const rows = applyFilters(all, req.query, groupBps);
+      const statusBase = applyFilters(all, { ...req.query, status: "" }, groupBps);
       const statusCounts = {
         all: statusBase.length,
         completed: statusBase.filter((r) => r.status === "Completed").length,
@@ -2363,7 +2533,23 @@ app.get(
   "/api/open-map",
   async (req, res) => {
     try {
-      const farmers = await allOpenMapFarmers();
+      let farmers = await allOpenMapFarmers();
+
+      if (clean(req.query.group_id)) {
+        const result = await getOwnedGroupBps(Number.parseInt(req.query.group_id, 10), req.user.id);
+        const groupBps = new Set(result.bps);
+        farmers = farmers.filter((r) => groupBps.has(r.bp));
+      }
+
+      const bp = clean(req.query.bp || req.query.q).toLowerCase();
+      const trader = clean(req.query.trader).toUpperCase();
+      if (bp || trader) {
+        farmers = farmers.filter((r) => {
+          if (bp && !String(r.bp || "").toLowerCase().includes(bp)) return false;
+          if (trader && traderFromBp(r.bp) !== trader) return false;
+          return true;
+        });
+      }
 
       const payload = {
         farmers,

@@ -20,6 +20,7 @@ import {
   CheckCircle2,
   Clock3,
   X,
+  Search,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -29,6 +30,13 @@ const CENTER = [13.0714100566, 75.6442024220];
 const FARMER_FIT_MAX_ZOOM = 13;
 const TEAM_REFRESH_MS = 5000;
 const LOCATION_SEND_MS = 10000;
+
+function traderFromBp(bp) {
+  const parts = String(bp || "").split("-");
+  if (parts.length < 3) return "";
+  const m = parts[2].match(/^([A-Za-z]+)\d+$/);
+  return (m ? m[1] : parts[2]).toUpperCase();
+}
 
 const mapsUrl = (lat, lon) =>
   `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lon}`)}`;
@@ -215,6 +223,10 @@ export default function ClusterMap() {
   const [loading, setLoading] = useState(true);
   const [refreshingTeam, setRefreshingTeam] = useState(false);
   const [error, setError] = useState("");
+  const [bpFilter, setBpFilter] = useState("");
+  const [traderFilter, setTraderFilter] = useState("");
+  const [groupFilter, setGroupFilter] = useState("");
+  const [groups, setGroups] = useState([]);
   const watchId = useRef(null);
   const lastSentAt = useRef(0);
 
@@ -228,6 +240,15 @@ export default function ClusterMap() {
       setError(e?.message || "Unable to load map.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadGroups = async () => {
+    try {
+      const result = await api.farmerGroups();
+      setGroups(result.groups || []);
+    } catch (e) {
+      console.warn("Farmer groups unavailable:", e);
     }
   };
 
@@ -270,6 +291,7 @@ export default function ClusterMap() {
     // Load farmer points first; team positions are independent and refresh
     // separately so the map becomes usable as soon as the farmer payload arrives.
     loadMap();
+    loadGroups();
     loadTeam();
 
     const teamTimer = setInterval(loadTeam, TEAM_REFRESH_MS);
@@ -301,10 +323,27 @@ export default function ClusterMap() {
     };
   }, []);
 
-  const farmers = useMemo(
+  const allMappedFarmers = useMemo(
     () => data.farmers.filter((f) => Number.isFinite(Number(f.lat)) && Number.isFinite(Number(f.lon))),
     [data.farmers]
   );
+
+  const traderOptions = useMemo(
+    () => [...new Set(allMappedFarmers.map((f) => traderFromBp(f.bp)).filter(Boolean))].sort(),
+    [allMappedFarmers]
+  );
+
+  const farmers = useMemo(() => {
+    const group = groups.find((g) => String(g.id) === String(groupFilter));
+    const groupBps = group ? new Set((group.farmer_bps || []).map(String)) : null;
+    const bp = bpFilter.trim().toLowerCase();
+    return allMappedFarmers.filter((f) => {
+      if (bp && !String(f.bp || "").toLowerCase().includes(bp)) return false;
+      if (traderFilter && traderFromBp(f.bp) !== traderFilter) return false;
+      if (groupBps && !groupBps.has(String(f.bp))) return false;
+      return true;
+    });
+  }, [allMappedFarmers, bpFilter, traderFilter, groupFilter, groups]);
 
   const completed = useMemo(() => farmers.filter((f) => f.status === "Completed").length, [farmers]);
   const pending = farmers.length - completed;
@@ -327,6 +366,29 @@ export default function ClusterMap() {
         <button className="open-map-refresh" type="button" onClick={() => { loadMap(); loadTeam(); }} title="Refresh map data">
           <RefreshCw size={16} className={refreshingTeam ? "spin" : ""} />
         </button>
+      </div>
+
+      <div className="open-map-filters">
+        <div className="open-map-bp-search">
+          <Search size={15} />
+          <input
+            value={bpFilter}
+            onChange={(e) => setBpFilter(e.target.value)}
+            placeholder="Search BP number"
+            aria-label="Search BP number"
+          />
+          {bpFilter && <button type="button" onClick={() => setBpFilter("")} title="Clear BP search"><X size={14} /></button>}
+        </div>
+
+        <select value={traderFilter} onChange={(e) => setTraderFilter(e.target.value)} aria-label="Trader">
+          <option value="">All Traders / VC</option>
+          {traderOptions.map((trader) => <option key={trader} value={trader}>{trader}</option>)}
+        </select>
+
+        <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)} aria-label="Farmer Group">
+          <option value="">All Groups</option>
+          {groups.map((group) => <option key={group.id} value={group.id}>{group.name} ({group.count || group.farmer_bps?.length || 0})</option>)}
+        </select>
       </div>
 
       <section className="open-map-canvas">

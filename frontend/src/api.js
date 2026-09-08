@@ -10,8 +10,11 @@ const API =
 let cachedAccessToken = "";
 let cachedUserId = "";
 let syncInProgress = false;
+let groupSyncInProgress = false;
 const OFFLINE_MASTER_KEY = "farmers-master";
 const OFFLINE_QUEUE_KEY = "completion-queue";
+const OFFLINE_GROUPS_KEY = "farmer-groups";
+const OFFLINE_GROUP_QUEUE_KEY = "farmer-group-queue";
 const OFFLINE_API_PREFIX = "api:";
 const userScopedKey = (base) => `${base}:${cachedUserId || "unknown-user"}`;
 
@@ -111,7 +114,103 @@ async function updateOfflineCompletion(bp, completed, remarks = "") {
   }
 }
 
-function applyOfflineFarmerFilters(master, params = {}) {
+
+async function readOfflineGroups() {
+  return (await offlineGet(userScopedKey(OFFLINE_GROUPS_KEY))) || [];
+}
+
+async function writeOfflineGroups(groups) {
+  await offlinePut(userScopedKey(OFFLINE_GROUPS_KEY), groups || []);
+}
+
+async function queueGroupAction(action) {
+  const queue = (await offlineGet(userScopedKey(OFFLINE_GROUP_QUEUE_KEY))) || [];
+  queue.push({ ...action, queuedAt: new Date().toISOString() });
+  await offlinePut(userScopedKey(OFFLINE_GROUP_QUEUE_KEY), queue);
+  notifyOfflineChange();
+}
+
+async function flushGroupQueue() {
+  if (groupSyncInProgress || !navigator.onLine) return;
+  const queue = (await offlineGet(userScopedKey(OFFLINE_GROUP_QUEUE_KEY))) || [];
+  if (!queue.length) return;
+
+  groupSyncInProgress = true;
+  try {
+    const remaining = [];
+    const groups = await readOfflineGroups();
+
+    for (const item of queue) {
+      try {
+        if (item.type === "create") {
+          const result = await request("/api/farmer-groups", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: item.name, farmer_bps: item.farmer_bps }),
+          });
+          const created = result.group;
+          const nextGroups = groups.filter((g) => String(g.id) !== String(item.localId));
+          nextGroups.push(created);
+          groups.splice(0, groups.length, ...nextGroups);
+        } else if (item.type === "delete") {
+          if (!String(item.id).startsWith("local-")) {
+            await request(`/api/farmer-groups/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+          }
+          const nextGroups = groups.filter((g) => String(g.id) !== String(item.id));
+          groups.splice(0, groups.length, ...nextGroups);
+        }
+      } catch (error) {
+        remaining.push(item);
+        if (isNetworkError(error)) break;
+      }
+    }
+
+    await writeOfflineGroups(groups);
+    await offlinePut(userScopedKey(OFFLINE_GROUP_QUEUE_KEY), remaining);
+    if (!remaining.length) notifyOfflineChange();
+  } finally {
+    groupSyncInProgress = false;
+  }
+}
+
+function applyOfflineGroupFilter(groups, groupId) {
+  if (!groupId) return null;
+  const group = (groups || []).find((g) => String(g.id) === String(groupId));
+  return group ? new Set((group.farmer_bps || []).map(String)) : null;
+}
+
+function applyOfflineOpenMapFilters(payload, params = {}, groups = []) {
+  if (!payload) return payload;
+  let farmers = Array.isArray(payload.farmers) ? payload.farmers : [];
+  const groupBps = applyOfflineGroupFilter(groups, params.group_id);
+  const bp = String(params.bp || params.q || "").trim().toLowerCase();
+  const trader = String(params.trader || "").trim().toUpperCase();
+
+  if (groupBps) farmers = farmers.filter((f) => groupBps.has(String(f.bp)));
+  if (bp) farmers = farmers.filter((f) => String(f.bp || "").toLowerCase().includes(bp));
+  if (trader) farmers = farmers.filter((f) => String(f.trader || traderFromBpClient(f.bp)).toUpperCase() === trader);
+
+  return {
+    ...payload,
+    farmers,
+    totals: {
+      ...(payload.totals || {}),
+      farmers: farmers.length,
+      completed: farmers.filter((f) => f.status === "Completed").length,
+      pending: farmers.filter((f) => f.status !== "Completed").length,
+    },
+    offline: true,
+  };
+}
+
+function traderFromBpClient(bp) {
+  const parts = String(bp || "").split("-");
+  if (parts.length < 3) return "";
+  const m = parts[2].match(/^([A-Za-z]+)\d+$/);
+  return (m ? m[1] : parts[2]).toUpperCase();
+}
+
+function applyOfflineFarmerFilters(master, params = {}, groups = []) {
   const all = Array.isArray(master?.farmers) ? master.farmers : [];
   const q = String(params.q || "").trim().toLowerCase();
   const team = String(params.team || "");
@@ -121,8 +220,10 @@ function applyOfflineFarmerFilters(master, params = {}) {
   const completionDate = String(params.completion_date || "");
   const completionFrom = String(params.completion_from || "");
   const completionTo = String(params.completion_to || "");
+  const groupBps = applyOfflineGroupFilter(groups, params.group_id);
 
   const matches = all.filter((r) => {
+    if (groupBps && !groupBps.has(String(r.bp))) return false;
     if (trader && String(r.trader || "") !== trader) return false;
     if (team && String(r.team || "") !== team) return false;
     if (day && String(r.day || "") !== day) return false;
@@ -190,11 +291,14 @@ async function flushCompletionQueue() {
 
 if (typeof window !== "undefined") {
   window.addEventListener("online", () => {
-    flushCompletionQueue().catch(() => {}).finally(() => {
+    flushGroupQueue().catch(() => {}).finally(() => {
+      flushCompletionQueue().catch(() => {}).finally(() => {
       // Reconcile the complete offline snapshot after signal returns.
       setTimeout(() => api?.primeOfflineData?.().catch(() => {}), 1200);
+      });
     });
   });
+  setInterval(() => flushGroupQueue().catch(() => {}), 10000);
   setInterval(() => flushCompletionQueue().catch(() => {}), 15000);
 }
 
@@ -293,6 +397,89 @@ export const api = {
   base: API,
 
   /* ----------------------------------------------------
+     Private farmer groups
+  ---------------------------------------------------- */
+
+  farmerGroups: async () => {
+    if (!navigator.onLine) return { groups: await readOfflineGroups(), offline: true };
+    try {
+      const result = await request("/api/farmer-groups");
+      await writeOfflineGroups(result.groups || []);
+      return result;
+    } catch (error) {
+      if (isNetworkError(error)) return { groups: await readOfflineGroups(), offline: true };
+      throw error;
+    }
+  },
+
+  createFarmerGroup: async (name, farmerBps) => {
+    const cleanName = String(name || "").trim();
+    const bps = [...new Set((farmerBps || []).map((x) => String(x).trim()).filter(Boolean))];
+    if (!cleanName) throw new Error("Group name is required.");
+    if (!bps.length) throw new Error("Select at least one farmer.");
+
+    if (!navigator.onLine) {
+      const groups = await readOfflineGroups();
+      const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const group = { id: localId, name: cleanName, farmer_bps: bps, count: bps.length, created_at: new Date().toISOString(), local: true };
+      await writeOfflineGroups([...groups, group]);
+      await queueGroupAction({ type: "create", localId, name: cleanName, farmer_bps: bps });
+      return { ok: true, group, offlineQueued: true };
+    }
+
+    try {
+      const result = await request("/api/farmer-groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: cleanName, farmer_bps: bps }),
+      });
+      const groups = await readOfflineGroups();
+      await writeOfflineGroups([...groups.filter((g) => String(g.id) !== String(result.group.id)), result.group]);
+      return result;
+    } catch (error) {
+      if (isNetworkError(error)) {
+        const groups = await readOfflineGroups();
+        const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const group = { id: localId, name: cleanName, farmer_bps: bps, count: bps.length, created_at: new Date().toISOString(), local: true };
+        await writeOfflineGroups([...groups, group]);
+        await queueGroupAction({ type: "create", localId, name: cleanName, farmer_bps: bps });
+        return { ok: true, group, offlineQueued: true };
+      }
+      throw error;
+    }
+  },
+
+  deleteFarmerGroup: async (id) => {
+    const groups = await readOfflineGroups();
+    const target = groups.find((g) => String(g.id) === String(id));
+    if (!target) throw new Error("Group not found.");
+
+    await writeOfflineGroups(groups.filter((g) => String(g.id) !== String(id)));
+
+    if (!navigator.onLine || String(id).startsWith("local-")) {
+      const queue = (await offlineGet(userScopedKey(OFFLINE_GROUP_QUEUE_KEY))) || [];
+      const remaining = String(id).startsWith("local-")
+        ? queue.filter((item) => !(item.type === "create" && String(item.localId) === String(id)))
+        : [...queue, { type: "delete", id, queuedAt: new Date().toISOString() }];
+      await offlinePut(userScopedKey(OFFLINE_GROUP_QUEUE_KEY), remaining);
+      notifyOfflineChange();
+      return { ok: true, offlineQueued: true };
+    }
+
+    try {
+      const result = await request(`/api/farmer-groups/${encodeURIComponent(id)}`, { method: "DELETE" });
+      return result;
+    } catch (error) {
+      if (isNetworkError(error)) {
+        const queue = (await offlineGet(userScopedKey(OFFLINE_GROUP_QUEUE_KEY))) || [];
+        await offlinePut(userScopedKey(OFFLINE_GROUP_QUEUE_KEY), [...queue, { type: "delete", id, queuedAt: new Date().toISOString() }]);
+        return { ok: true, offlineQueued: true };
+      }
+      throw error;
+    }
+  },
+
+  /* ----------------------------------------------------
      Dashboard
   ---------------------------------------------------- */
 
@@ -307,14 +494,14 @@ export const api = {
 
   farmers: async (params = {}) => {
     if (!navigator.onLine) {
-      const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params);
+      const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params, await readOfflineGroups());
       if (cached) return cached;
     }
     try {
       return await request(`/api/farmers?${query(params)}`);
     } catch (error) {
       if (isNetworkError(error)) {
-        const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params);
+        const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params, await readOfflineGroups());
         if (cached) return cached;
       }
       throw error;
@@ -350,10 +537,21 @@ export const api = {
      Open Map
   ---------------------------------------------------- */
 
-  openMap: () =>
-    request(
-      "/api/open-map"
-    ),
+  openMap: async (params = {}) => {
+    const qs = query(params);
+    const path = qs ? `/api/open-map?${qs}` : "/api/open-map";
+    if (!navigator.onLine) {
+      return applyOfflineOpenMapFilters(await readCachedApi("/api/open-map"), params, await readOfflineGroups());
+    }
+    try {
+      return await request(path);
+    } catch (error) {
+      if (isNetworkError(error)) {
+        return applyOfflineOpenMapFilters(await readCachedApi("/api/open-map"), params, await readOfflineGroups());
+      }
+      throw error;
+    }
+  },
 
   /* ----------------------------------------------------
      Cluster Map
@@ -447,12 +645,14 @@ export const api = {
   primeOfflineData: async () => {
     if (!navigator.onLine) return { offline: true };
     try {
-      const [farmers, openMap] = await Promise.all([
+      const [farmers, openMap, groups] = await Promise.all([
         request(`/api/farmers?${query({ page: 1, page_size: 2500 })}`),
         request("/api/open-map"),
+        request("/api/farmer-groups"),
       ]);
       await writeOfflineMaster(farmers);
       await cacheApi(`/api/open-map`, openMap);
+      await writeOfflineGroups(groups.groups || []);
       return { ok: true };
     } catch (error) {
       console.warn("Offline data preparation skipped:", error?.message || error);
@@ -463,7 +663,7 @@ export const api = {
   offlineFarmers: async (params = {}) => {
     const master = await readOfflineMaster();
     if (!master) return null;
-    return applyOfflineFarmerFilters(master, params);
+    return applyOfflineFarmerFilters(master, params, await readOfflineGroups());
   },
 
   /* ----------------------------------------------------

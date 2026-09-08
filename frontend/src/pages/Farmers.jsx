@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Edit3, MapPin, Phone, RefreshCw, RotateCcw, Search, CalendarDays } from "lucide-react";
+import { CheckCircle2, Edit3, MapPin, Phone, RefreshCw, RotateCcw, Search, CalendarDays, Users, Plus, Trash2, X } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { PageHead, Loading, ErrorCard, Empty, pct } from "../components";
@@ -13,6 +13,7 @@ const blank = {
   completion_date: "",
   completion_from: "",
   completion_to: "",
+  group_id: "",
 };
 
 const mapsUrl = (lat, lon) =>
@@ -45,8 +46,72 @@ export default function Farmers() {
   const [page, setPage] = useState(1);
   const requestSeq = useRef(0);
   const responseCache = useRef(new Map());
+  const [groups, setGroups] = useState([]);
+  const [groupsLoading, setGroupsLoading] = useState(true);
+  const [groupError, setGroupError] = useState("");
+  const [selectedBps, setSelectedBps] = useState(() => new Set());
+  const [groupName, setGroupName] = useState("");
+  const [groupModal, setGroupModal] = useState(false);
+  const [groupBusy, setGroupBusy] = useState(false);
 
   const set = (key, value) => setFilters((x) => ({ ...x, [key]: value }));
+
+  const loadGroups = async () => {
+    try {
+      setGroupsLoading(true);
+      setGroupError("");
+      const result = await api.farmerGroups();
+      setGroups(result.groups || []);
+    } catch (e) {
+      setGroupError(e.message || "Unable to load groups");
+    } finally {
+      setGroupsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadGroups();
+  }, []);
+
+  const toggleSelected = (bp) => {
+    setSelectedBps((current) => {
+      const next = new Set(current);
+      if (next.has(bp)) next.delete(bp);
+      else next.add(bp);
+      return next;
+    });
+  };
+
+  const createGroup = async () => {
+    const name = groupName.trim();
+    if (!name) return setGroupError("Enter a group name.");
+    if (!selectedBps.size) return setGroupError("Select at least one farmer.");
+    setGroupBusy(true);
+    setGroupError("");
+    try {
+      const result = await api.createFarmerGroup(name, [...selectedBps]);
+      setGroups((current) => [...current.filter((g) => String(g.id) !== String(result.group.id)), result.group]);
+      setGroupName("");
+      setSelectedBps(new Set());
+      setGroupModal(false);
+    } catch (e) {
+      setGroupError(e.message || "Unable to create group");
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const deleteGroup = async (group) => {
+    if (!window.confirm(`Delete group "${group.name}"? Farmers will not be deleted.`)) return;
+    setGroupError("");
+    try {
+      await api.deleteFarmerGroup(group.id);
+      setGroups((current) => current.filter((g) => String(g.id) !== String(group.id)));
+      if (String(filters.group_id) === String(group.id)) set("group_id", "");
+    } catch (e) {
+      setGroupError(e.message || "Unable to delete group");
+    }
+  };
 
   const load = async (pageOverride = page, { silent = false } = {}) => {
     const currentSeq = ++requestSeq.current;
@@ -86,7 +151,7 @@ export default function Farmers() {
     setPage(1);
     const timer = setTimeout(() => load(1), 220);
     return () => clearTimeout(timer);
-  }, [filters.q, filters.team, filters.day, filters.status, filters.completion_date, filters.completion_from, filters.completion_to, filters.trader]);
+  }, [filters.q, filters.team, filters.day, filters.status, filters.completion_date, filters.completion_from, filters.completion_to, filters.trader, filters.group_id]);
 
   useEffect(() => {
     if (page > 1) load(page);
@@ -212,6 +277,43 @@ export default function Farmers() {
         actions={<button className="icon-btn" onClick={() => { responseCache.current.clear(); load(page, { silent: true }); }} title="Refresh"><RefreshCw size={16} /></button>}
       />
 
+      <div className="farmer-groups-card card">
+        <div className="farmer-groups-head">
+          <div>
+            <div className="eyebrow">PRIVATE GROUPS</div>
+            <h2><Users size={16} /> My farmer groups</h2>
+            <p>Only you can see and manage these groups.</p>
+          </div>
+          <button className="primary-btn" type="button" onClick={() => { setGroupError(""); setGroupModal(true); }}>
+            <Plus size={15} /> Create group
+          </button>
+        </div>
+
+        {groupError && <div className="group-error">{groupError}</div>}
+
+        <div className="farmer-group-list">
+          <button
+            type="button"
+            className={`farmer-group-chip ${!filters.group_id ? "active" : ""}`}
+            onClick={() => set("group_id", "")}
+          >
+            All farmers
+          </button>
+          {groupsLoading && <span className="group-muted">Loading groups…</span>}
+          {!groupsLoading && !groups.length && <span className="group-muted">No groups yet.</span>}
+          {groups.map((g) => (
+            <div className={`farmer-group-chip-wrap ${String(filters.group_id) === String(g.id) ? "active" : ""}`} key={g.id}>
+              <button type="button" className="farmer-group-chip" onClick={() => set("group_id", g.id)}>
+                {g.name} <b>{g.count || g.farmer_bps?.length || 0}</b>
+              </button>
+              <button type="button" className="farmer-group-delete" title={`Delete ${g.name}`} onClick={() => deleteGroup(g)}>
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="farmer-filter-card card">
         <div className="farmer-filter-row">
           <div className="farmer-search">
@@ -229,6 +331,10 @@ export default function Farmers() {
           <select value={filters.day} onChange={(e) => set("day", e.target.value)} aria-label="Day">
             <option value="">All Days</option>
             {(data.options?.days || []).map((x) => <option key={x} value={x}>Day {x}</option>)}
+          </select>
+          <select value={filters.group_id} onChange={(e) => set("group_id", e.target.value)} aria-label="Farmer Group">
+            <option value="">All Groups</option>
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.name} ({g.count || g.farmer_bps?.length || 0})</option>)}
           </select>
           <button className="clear-filter" onClick={clearFilters}>Clear</button>
         </div>
@@ -263,6 +369,16 @@ export default function Farmers() {
         <span>{loading ? "Updating…" : `Page ${page} of ${pages}`}</span>
       </div>
 
+      {selectedBps.size > 0 && (
+        <div className="farmer-selection-bar">
+          <span><b>{selectedBps.size}</b> farmers selected</span>
+          <button type="button" className="primary-btn" onClick={() => { setGroupError(""); setGroupModal(true); }}>
+            <Users size={14} /> Save as group
+          </button>
+          <button type="button" className="secondary-btn" onClick={() => setSelectedBps(new Set())}>Clear selection</button>
+        </div>
+      )}
+
       <div className="farmer-cards">
         {shown.map((f) => {
           const completed = f.status === "Completed";
@@ -271,9 +387,17 @@ export default function Farmers() {
           return (
             <article key={f.bp} className={`farmer-card ${completed ? "farmer-completed" : "farmer-pending"}`}>
               <div className="farmer-card-top">
-                <div>
-                  <div className="farmer-name-title">{f.name || "Farmer"}</div>
+                <div className="farmer-card-select">
+                  <input
+                    type="checkbox"
+                    checked={selectedBps.has(f.bp)}
+                    onChange={() => toggleSelected(f.bp)}
+                    aria-label={`Select ${f.bp}`}
+                  />
+                  <div>
+                    <div className="farmer-name-title">{f.name || "Farmer"}</div>
                   <div className="farmer-bp">BP: {f.bp || "—"}</div>
+                  </div>
                 </div>
                 <span className={`farmer-status ${completed ? "completed" : "pending"}`}>
                   {completed ? <><CheckCircle2 size={14} /> Completed</> : "Pending"}
@@ -324,6 +448,31 @@ export default function Farmers() {
       </div>
 
       {pages > 1 && <div className="pagination"><button disabled={page === 1} onClick={() => setPage((p) => p - 1)}>Previous</button><span>{page} / {pages}</span><button disabled={page === pages} onClick={() => setPage((p) => p + 1)}>Next</button></div>}
+
+      {groupModal && (
+        <div className="modal-backdrop">
+          <div className="modal-card farmer-group-modal">
+            <button className="group-modal-close" type="button" onClick={() => setGroupModal(false)}><X size={18} /></button>
+            <div className="eyebrow">PRIVATE FARMER GROUP</div>
+            <h2>Save selected farmers</h2>
+            <p><b>{selectedBps.size}</b> farmer BP numbers will be saved to your private group.</p>
+            <input
+              className="group-name-input"
+              value={groupName}
+              onChange={(e) => setGroupName(e.target.value)}
+              placeholder="Group name"
+              maxLength={100}
+              autoFocus
+            />
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" onClick={() => setGroupModal(false)}>Cancel</button>
+              <button className="primary-btn" type="button" disabled={groupBusy} onClick={createGroup}>
+                {groupBusy ? "Saving…" : "Save group"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editing && (
         <div className="modal-backdrop">
