@@ -35,3 +35,11 @@ The area field is kept as one field exactly as supplied; negative values are not
 ## Development
 Backend: `cd backend && npm install && npm start`
 Frontend: `cd frontend && npm install && npm run dev`
+
+
+## Latest targeted fix — BP + fast completion + refresh
+- Open Map farmer popup now includes **BP Number**.
+- Complete/Reopen updates the visible Farmers card immediately, then reconciles with the server in the background.
+- Completion audit logging no longer delays the completion response.
+- Frontend builds route entry files so refreshing React routes on the Render static site does not return `Not Found`.
+- No other workflow or map/filter/admin behavior was intentionally changed.

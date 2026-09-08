@@ -2514,7 +2514,11 @@ app.post(
       }
 
       invalidateDataCache();
-      await audit(req.user, completed ? "visit_completed" : "visit_reopened", {
+
+      // Audit logging is intentionally kept off the completion response path.
+      // The status update is already committed above, so the user can see the
+      // result immediately while the audit entry is written in the background.
+      audit(req.user, completed ? "visit_completed" : "visit_reopened", {
         entity_type: "farmer",
         entity_id: bp,
         payload: {
@@ -2524,6 +2528,8 @@ app.post(
           completed_by_email: clean(req.user?.email).toLowerCase() || null,
           completed_by_name: clean(req.user?.profile?.full_name) || clean(req.user?.email),
         },
+      }).catch((auditError) => {
+        console.warn("Completion audit failed:", auditError?.message || auditError);
       });
 
       res.json({

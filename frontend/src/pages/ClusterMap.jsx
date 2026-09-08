@@ -164,6 +164,7 @@ function FarmerPopup({ farmer, myLocation }) {
       <h3>{farmer.name || "Unnamed farmer"}</h3>
 
       <div className="popup-grid farmer-popup-details">
+        <span>BP Number</span><b>{farmer.bp || "—"}</b>
         <span>Farm name</span><b>{farmer.farm_name || "—"}</b>
         <span>Area under rejuvenation</span><b>{farmer.area_under_rejuvenation || "—"}</b>
         {distance != null && (

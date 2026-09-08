@@ -109,13 +109,65 @@ export default function Farmers() {
 
   const toggle = async (farmer) => {
     const completing = farmer.status !== "Completed";
+    const previousData = data;
+    const nextStatus = completing ? "Completed" : "Pending";
+    const nextCompletionDate = completing ? new Date().toISOString() : null;
+
     setBusyBp(farmer.bp);
     setError("");
+
+    // Update the visible card immediately. The server remains the source of
+    // truth; a background refresh below reconciles the list and counts.
+    setData((current) => {
+      const nextFarmers = (current.farmers || [])
+        .map((f) =>
+          f.bp === farmer.bp
+            ? {
+                ...f,
+                status: nextStatus,
+                completion_date: nextCompletionDate,
+              }
+            : f
+        )
+        .filter((f) => {
+          if (filters.status === "Pending" && completing && f.bp === farmer.bp) return false;
+          if (filters.status === "Completed" && !completing && f.bp === farmer.bp) return false;
+          return true;
+        });
+
+      const statusCounts = current.statusCounts
+        ? {
+            ...current.statusCounts,
+            all: current.statusCounts.all + (nextFarmers.length === (current.farmers || []).length ? 0 : -1),
+            completed: Math.max(
+              0,
+              current.statusCounts.completed + (completing ? 1 : -1)
+            ),
+            pending: Math.max(
+              0,
+              current.statusCounts.pending + (completing ? -1 : 1)
+            ),
+          }
+        : current.statusCounts;
+
+      return {
+        ...current,
+        farmers: nextFarmers,
+        total: current.total + (nextFarmers.length === (current.farmers || []).length ? 0 : -1),
+        statusCounts,
+      };
+    });
+
     try {
       await api.setCompleted(farmer.bp, completing, completing ? farmer.remarks || "" : "");
       responseCache.current.clear();
-      await load();
+
+      // Reconcile in the background without making the user wait for the
+      // card to change state.
+      load(page, { silent: true });
     } catch (e) {
+      // Restore the exact list if the server update failed.
+      setData(previousData);
       setError(e.message || "Could not update visit status");
     } finally {
       setBusyBp("");
@@ -124,13 +176,25 @@ export default function Farmers() {
 
   const saveRemarks = async () => {
     if (!editing) return;
+    const previousData = data;
     setBusyBp(editing.bp);
+    setError("");
+
+    // Save the edited remark in the visible card immediately.
+    setData((current) => ({
+      ...current,
+      farmers: (current.farmers || []).map((f) =>
+        f.bp === editing.bp ? { ...f, remarks } : f
+      ),
+    }));
+
     try {
       await api.setCompleted(editing.bp, editing.status === "Completed", remarks);
       setEditing(null);
       responseCache.current.clear();
-      await load();
+      load(page, { silent: true });
     } catch (e) {
+      setData(previousData);
       setError(e.message || "Could not save remarks");
     } finally {
       setBusyBp("");
