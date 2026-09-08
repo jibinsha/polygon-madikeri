@@ -99,6 +99,7 @@ create index if not exists audit_logs_created_idx on public.audit_logs(created_a
 create index if not exists audit_logs_user_idx on public.audit_logs(user_id);
 create index if not exists audit_logs_action_idx on public.audit_logs(action);
 create index if not exists audit_logs_email_idx on public.audit_logs(user_email);
+create index if not exists completed_farmers_completed_at_idx on public.completed_farmers(completed_at desc);
 
 alter table public.completed_farmers add column if not exists completed_by uuid references auth.users(id) on delete set null;
 alter table public.completed_farmers add column if not exists completed_by_email text;
@@ -130,4 +131,5 @@ create table if not exists public.team_locations (
 
 create index if not exists team_locations_user_idx on public.team_locations(user_id);
 create index if not exists team_locations_created_idx on public.team_locations(created_at desc);
+create index if not exists team_locations_user_created_idx on public.team_locations(user_id, created_at desc);
 alter table public.team_locations enable row level security;

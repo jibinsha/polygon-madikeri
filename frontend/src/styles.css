@@ -157,3 +157,12 @@
 
 @media(max-width:900px){.open-map-page{height:calc(100dvh - 55px);min-height:0}.open-map-toolbar{padding:7px 10px;gap:8px;flex-wrap:wrap}.open-map-title{order:1;flex:1;min-width:130px}.open-map-title h1{font-size:18px}.open-map-toolbar>.back-link{order:0}.open-map-kpis{order:3;width:100%;justify-content:flex-start;overflow-x:auto;flex-wrap:nowrap;padding-bottom:1px;scrollbar-width:none}.open-map-kpis::-webkit-scrollbar{display:none}.open-map-kpis span{white-space:nowrap}.open-map-refresh{order:2}.open-map-legend{left:8px;right:8px;bottom:8px;font-size:8px;gap:7px;padding:7px 8px}.open-map-status{left:8px;right:8px;bottom:57px;justify-content:flex-start;font-size:8px}.open-map-error{top:9px}.open-map-canvas .map-control{right:8px}}
 @media(max-width:520px){.open-map-page{height:calc(100dvh - 55px)}.open-map-toolbar>.back-link{font-size:10px}.open-map-title{min-width:0}.open-map-kpis span{padding:5px 7px;font-size:8px}.open-map-kpis b{font-size:11px}.open-map-canvas .leaflet-control-zoom{margin-top:8px;margin-left:8px}.open-map-legend{max-width:calc(100% - 16px)}.open-map-status{bottom:64px}.farmer-map-popup{min-width:200px}.popup-actions{display:grid;grid-template-columns:1fr 1fr}.popup-action:last-child{grid-column:1/-1}}
+
+/* =====================================================
+   PERFORMANCE / SIMPLIFIED DASHBOARD / OPEN MAP
+===================================================== */
+.dashboard-completion-meta{display:flex;gap:14px;flex-wrap:wrap;margin-top:11px;font-size:9px;color:#718078}
+.dashboard-completion-meta b{color:#2b5f48;font-size:11px}
+.farmer-map-popup{min-width:220px}
+.farmer-popup-details b{white-space:normal;word-break:break-word}
+.legend-team{background:#9c62d2;border:2px solid #7144a5}

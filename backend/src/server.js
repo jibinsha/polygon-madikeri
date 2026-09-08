@@ -90,15 +90,22 @@ const DB_PAGE_SIZE = 1000;
 
 // Short-lived in-memory caches keep the existing workflow/UI intact while
 // avoiding repeated Supabase reads for every filter/search request.
-const DATA_CACHE_TTL_MS = 30000;
+const DATA_CACHE_TTL_MS = 60000;
 let farmersCache = { at: 0, data: null };
+let openMapFarmersCache = { at: 0, data: null };
 let clusterPointsCache = { at: 0, data: null };
 let masterFieldsCache = null;
 const authCache = new Map();
-const AUTH_CACHE_TTL_MS = 30000;
+const AUTH_CACHE_TTL_MS = 60000;
+const PROFILE_LIST_CACHE_TTL_MS = 60000;
+const TEAM_LOCATION_CACHE_TTL_MS = 5000;
+const OPEN_MAP_FARMER_TTL_MS = 15000;
+let profileListCache = { at: 0, data: null };
+let teamLocationCache = { at: 0, data: null };
 
 function invalidateDataCache() {
   farmersCache = { at: 0, data: null };
+  openMapFarmersCache = { at: 0, data: null };
   clusterPointsCache = { at: 0, data: null };
 }
 
@@ -782,6 +789,22 @@ function bundledMasterFields() {
   }
 }
 
+async function allProfiles() {
+  const now = Date.now();
+  if (profileListCache.data && now - profileListCache.at < PROFILE_LIST_CACHE_TTL_MS) {
+    return profileListCache.data;
+  }
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("user_id,email,full_name,team,role,is_active,last_login_at,last_seen_at");
+
+  if (error) throw new Error(`Failed to fetch profiles: ${error.message}`);
+
+  profileListCache = { at: now, data: data || [] };
+  return profileListCache.data;
+}
+
 async function allFarmersFromDb() {
   /* -------------------------------
      DEMO MODE
@@ -806,21 +829,15 @@ async function allFarmersFromDb() {
      NOT JUST FIRST 1000
   ------------------------------- */
 
-  const data = await fetchAllRows(
-    "farmers",
-    "*",
-    "id"
-  );
-
-  /* -------------------------------
-     FETCH ALL COMPLETED FARMERS
-  ------------------------------- */
-
-  const done = await fetchAllRows(
-    "completed_farmers",
-    "bp_number,remarks,completed_at,completed_by,completed_by_email",
-    "bp_number"
-  );
+  // These datasets are independent, so fetch them concurrently.
+  const [data, done] = await Promise.all([
+    fetchAllRows("farmers", "*", "id"),
+    fetchAllRows(
+      "completed_farmers",
+      "bp_number,remarks,completed_at,completed_by,completed_by_email",
+      "bp_number"
+    ),
+  ]);
 
   /*
     Resolve the enumerator/admin name from profiles.
@@ -830,18 +847,7 @@ async function allFarmersFromDb() {
   let profiles = [];
 
   if (done.length) {
-    const { data: profileRows, error: profileError } =
-      await supabase
-        .from("profiles")
-        .select("user_id,email,full_name");
-
-    if (profileError) {
-      throw new Error(
-        `Failed to fetch user profiles: ${profileError.message}`
-      );
-    }
-
-    profiles = profileRows || [];
+    profiles = await allProfiles();
   }
 
   const profileById = new Map(
@@ -920,7 +926,7 @@ async function allFarmersFromDb() {
 }
 
 /* Cached farmer dataset. Filters are still applied exactly as before,
-   but repeated requests within 30 seconds do not hit Supabase. */
+   but repeated requests within 60 seconds do not hit Supabase. */
 async function allFarmers() {
   const now = Date.now();
   if (farmersCache.data && now - farmersCache.at < DATA_CACHE_TTL_MS) {
@@ -1247,56 +1253,57 @@ function teamSummary(rows) {
 ======================================================= */
 
 function traderSummary(rows) {
-  return unique(
-    rows.map((r) => r.trader)
-  ).map((trader) => {
-    const rs = rows.filter(
-      (r) => r.trader === trader
-    );
+  const m = new Map();
 
-    const completed =
-      rs.filter(
-        (r) =>
-          r.status === "Completed"
-      ).length;
+  for (const r of rows) {
+    const trader = r.trader || "Unknown";
+    if (!m.has(trader)) {
+      m.set(trader, {
+        trader,
+        total: 0,
+        completed: 0,
+        clusters: new Set(),
+        teams: new Set(),
+      });
+    }
 
-    return {
-      trader:
-        trader || "Unknown",
+    const item = m.get(trader);
+    item.total += 1;
+    if (r.status === "Completed") item.completed += 1;
+    if (r.cluster) item.clusters.add(r.cluster);
+    if (r.team) item.teams.add(r.team);
+  }
 
-      total: rs.length,
-
-      completed,
-
-      pending:
-        rs.length - completed,
-
-      progress: rs.length
-        ? Math.round(
-            (completed /
-              rs.length) *
-              100
-          )
-        : 0,
-
-      clusters: unique(
-        rs.map(
-          (r) => r.cluster
-        )
-      ),
-
-      teams: unique(
-        rs.map(
-          (r) => r.team
-        )
-      ),
-    };
-  });
+  return [...m.values()]
+    .sort((a, b) => a.trader.localeCompare(b.trader, undefined, { numeric: true }))
+    .map((item) => ({
+      trader: item.trader,
+      total: item.total,
+      completed: item.completed,
+      pending: item.total - item.completed,
+      progress: item.total ? Math.round((item.completed / item.total) * 100) : 0,
+      clusters: [...item.clusters].sort(),
+      teams: [...item.teams].sort(),
+    }));
 }
 
 /* =======================================================
    TOTALS
 ======================================================= */
+
+function completionTotals(rows) {
+  let completed = 0;
+  for (const r of rows) {
+    if (r.status === "Completed") completed++;
+  }
+
+  return {
+    farmers: rows.length,
+    completed,
+    pending: rows.length - completed,
+    progress: rows.length ? Math.round((completed / rows.length) * 100) : 0,
+  };
+}
 
 function totals(rows) {
   const completed =
@@ -1827,10 +1834,14 @@ async function requireAuth(req, res, next) {
     const entry = authCache.get(token);
     const shouldTouch = !entry || !entry.activityAt || now - entry.activityAt >= 120000;
     if (shouldTouch) {
-      await supabase
+      // Do not make every authenticated request wait for an activity write.
+      supabase
         .from("profiles")
         .update({ last_seen_at: new Date().toISOString() })
-        .eq("user_id", user.id);
+        .eq("user_id", user.id)
+        .then(({ error }) => {
+          if (error) console.warn("Activity update failed:", error.message);
+        });
       if (entry) entry.activityAt = now;
     }
 
@@ -1876,182 +1887,21 @@ app.get(
   "/api/dashboard",
   async (req, res) => {
     try {
-      /*
-        IMPORTANT:
-        allFarmers() now fetches 1167+
-        instead of stopping at 1000.
-      */
+      // Dashboard only needs completion totals and trader completion.
+      // Do not build/download map or cluster data here.
+      const all = await allFarmers();
+      const rows = applyFilters(all, req.query);
+      const payload = {
+        totals: completionTotals(rows),
+        traders: traderSummary(rows),
+        allTotal: rows.length,
+      };
 
-      const all =
-        await allFarmers();
-
-      const rows =
-        applyFilters(
-          all,
-          req.query
-        );
-
-      const cs =
-        clusterSummary(rows);
-
-      const ts =
-        traderSummary(rows);
-
-      const mapPoints =
-        await allClusterPoints();
-
-      const mapFiltered =
-        mapPoints.filter((p) => {
-          const trader =
-            clean(
-              req.query.trader
-            ).toUpperCase();
-
-          const team =
-            clean(
-              req.query.team
-            );
-
-          const day =
-            clean(
-              req.query.day
-            );
-
-          const cluster =
-            clean(
-              req.query.cluster
-            );
-
-          if (
-            team &&
-            p.team !== team
-          ) {
-            return false;
-          }
-
-          if (
-            day &&
-            p.day !== day
-          ) {
-            return false;
-          }
-
-          if (
-            cluster &&
-            String(
-              p.cluster
-            ) !==
-              String(
-                cluster
-              )
-          ) {
-            return false;
-          }
-
-          if (
-            trader &&
-            !rows.some(
-              (r) =>
-                String(
-                  r.cluster
-                ) ===
-                  String(
-                    p.cluster
-                  ) &&
-                r.trader ===
-                  trader
-            )
-          ) {
-            return false;
-          }
-
-          return true;
-        });
-
-      const mapClusters =
-        unique(
-          mapFiltered.map(
-            (p) =>
-              p.cluster
-          )
-        );
-
-      res.json({
-        totals: {
-          ...totals(rows),
-
-          clusters:
-            Math.max(
-              cs.length,
-              mapClusters.length
-            ),
-        },
-
-        traders: ts,
-
-        teams:
-          teamSummary(rows),
-
-        clusters: cs,
-
-        clusterPoints:
-          mapFiltered,
-
-        /*
-          IMPORTANT:
-          This is useful for the Dashboard
-          farmer map.
-        */
-        points: rows
-          .filter(
-            (r) =>
-              r.lat !== null &&
-              r.lon !== null
-          )
-          .map((r, i) => ({
-            ...r,
-            color:
-              cs.find(
-                (c) =>
-                  String(
-                    c.cluster
-                  ) ===
-                  String(
-                    r.cluster
-                  )
-              )?.color ||
-              COLORS[
-                i %
-                  COLORS.length
-              ],
-          })),
-
-        office: OFFICE,
-
-        options:
-          options(all),
-
-        filters:
-          req.query,
-
-        /*
-          Useful for checking the
-          actual database count.
-        */
-        allTotal:
-          all.length,
-      });
+      res.setHeader("Cache-Control", "private, max-age=20, stale-while-revalidate=40");
+      res.json(payload);
     } catch (e) {
-      console.error(
-        "Dashboard error:",
-        e
-      );
-
-      res.status(500).json({
-        error:
-          e.message ||
-          "Dashboard failed",
-      });
+      console.error("Dashboard error:", e);
+      res.status(500).json({ error: e.message || "Dashboard failed" });
     }
   }
 );
@@ -2356,6 +2206,107 @@ app.get(
 );
 
 /* =======================================================
+   OPEN MAP FARMER DATA
+======================================================= */
+
+async function allOpenMapFarmers() {
+  const now = Date.now();
+  if (openMapFarmersCache.data && now - openMapFarmersCache.at < OPEN_MAP_FARMER_TTL_MS) {
+    return openMapFarmersCache.data;
+  }
+
+  if (!hasDb) {
+    const data = demoFarmers.map((r) => ({
+      bp: r.bp,
+      name: r.name,
+      farm_name: r.farm_name || "",
+      area_under_rejuvenation: r.area_under_rejuvenation || "",
+      phone: r.phone,
+      lat: r.lat,
+      lon: r.lon,
+      status: demoDone.has(r.bp) ? "Completed" : "Pending",
+      completion_date: demoDone.has(r.bp) ? null : null,
+      completion_by_name: "",
+    }));
+    openMapFarmersCache = { at: now, data };
+    return data;
+  }
+
+  const [rows, done] = await Promise.all([
+    fetchAllRows(
+      "farmers",
+      "id,bp_number,farmer_name,phone,name_in_bpm,farm_name,area_under_rejuvenation,latitude,longitude",
+      "id"
+    ),
+    fetchAllRows(
+      "completed_farmers",
+      "bp_number,completed_at,completed_by,completed_by_email",
+      "bp_number"
+    ),
+  ]);
+
+  let profiles = [];
+  if (done.length) profiles = await allProfiles();
+
+  const profileById = new Map(
+    profiles.map((p) => [
+      String(p.user_id),
+      { name: clean(p.full_name), email: clean(p.email).toLowerCase() },
+    ])
+  );
+
+  const profileByEmail = new Map(
+    profiles.map((p) => [
+      clean(p.email).toLowerCase(),
+      { name: clean(p.full_name), email: clean(p.email).toLowerCase() },
+    ])
+  );
+
+  const doneMap = new Map(
+    done.map((x) => {
+      const person =
+        (x.completed_by && profileById.get(String(x.completed_by))) ||
+        (x.completed_by_email && profileByEmail.get(clean(x.completed_by_email).toLowerCase()));
+
+      return [
+        clean(x.bp_number),
+        {
+          completed_at: x.completed_at || null,
+          completed_by_name: clean(person?.name) || clean(x.completed_by_email),
+        },
+      ];
+    })
+  );
+
+  const masterFields = bundledMasterFields();
+
+  const data = rows
+    .map((r) => {
+      const bp = clean(r.bp_number);
+      const fallback = masterFields.get(bp);
+      const completed = doneMap.get(bp);
+
+      return {
+        bp,
+        name: clean(r.farmer_name),
+        farm_name: clean(r.farm_name) || clean(fallback?.farm_name),
+        area_under_rejuvenation:
+          clean(r.area_under_rejuvenation) || clean(fallback?.area_under_rejuvenation),
+        phone: clean(r.phone),
+        lat: num(r.latitude),
+        lon: num(r.longitude),
+        status: completed ? "Completed" : "Pending",
+        completion_date: completed?.completed_at || null,
+        completion_by_name: completed?.completed_by_name || "",
+      };
+    })
+    .filter((r) => r.lat !== null && r.lon !== null);
+
+  openMapFarmersCache = { at: now, data };
+  return data;
+}
+
+/* =======================================================
    OPEN MAP
 
    Lightweight map payload: no cluster polygons, cluster lists or
@@ -2363,78 +2314,66 @@ app.get(
    existing dataset, while team positions are returned separately.
 ======================================================= */
 
+async function getLiveTeamPayload() {
+  const now = Date.now();
+  if (teamLocationCache.data && now - teamLocationCache.at < TEAM_LOCATION_CACHE_TTL_MS) {
+    return teamLocationCache.data;
+  }
+
+  const users = (await allProfiles())
+    .filter((u) => u.is_active)
+    .sort((a, b) => clean(a.full_name).localeCompare(clean(b.full_name)));
+
+  const recentSince = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const { data: locations, error: locError } = await supabase
+    .from("team_locations")
+    .select("id,user_id,latitude,longitude,accuracy,created_at")
+    .gte("created_at", recentSince)
+    .order("created_at", { ascending: false })
+    .limit(500);
+
+  if (locError) throw new Error(locError.message);
+
+  const latest = new Map();
+  (locations || []).forEach((x) => {
+    if (!latest.has(x.user_id)) latest.set(x.user_id, x);
+  });
+
+  const payload = {
+    users: (users || []).map((u) => ({
+      id: u.id,
+      user_id: u.user_id,
+      email: u.email,
+      full_name: u.full_name,
+      team: u.team,
+      role: u.role,
+      last_seen_at: u.last_seen_at,
+      location: latest.get(u.user_id) || null,
+    })),
+  };
+
+  teamLocationCache = { at: now, data: payload };
+  return payload;
+}
+
 app.get(
   "/api/open-map",
   async (req, res) => {
     try {
-      const all = await allFarmers();
+      const farmers = await allOpenMapFarmers();
 
-      const farmers = all
-        .filter((r) => r.lat !== null && r.lon !== null)
-        .map((r) => ({
-          bp: r.bp,
-          name: r.name,
-          name_in_bpm: r.name_in_bpm,
-          farm_name: r.farm_name,
-          area_under_rejuvenation: r.area_under_rejuvenation,
-          phone: r.phone,
-          village: r.village,
-          trader: r.trader,
-          cluster: r.cluster,
-          team: r.team,
-          employee: r.employee,
-          day: r.day,
-          lat: r.lat,
-          lon: r.lon,
-          status: r.status,
-          completion_date: r.completion_date,
-          remarks: r.remarks,
-        }));
-
-      let teamMembers = [];
-      if (hasDb) {
-        const { data: users, error: usersError } = await supabase
-          .from("profiles")
-          .select("id,user_id,email,full_name,team,role,is_active,last_seen_at")
-          .eq("is_active", true)
-          .order("full_name", { ascending: true });
-        if (usersError) throw new Error(usersError.message);
-
-        const { data: locations, error: locError } = await supabase
-          .from("team_locations")
-          .select("id,user_id,latitude,longitude,accuracy,created_at")
-          .order("created_at", { ascending: false })
-          .limit(500);
-        if (locError) throw new Error(locError.message);
-
-        const latest = new Map();
-        (locations || []).forEach((x) => {
-          if (!latest.has(x.user_id)) latest.set(x.user_id, x);
-        });
-
-        teamMembers = (users || []).map((u) => ({
-        id: u.id,
-        user_id: u.user_id,
-        email: u.email,
-        full_name: u.full_name,
-        team: u.team,
-        role: u.role,
-        last_seen_at: u.last_seen_at,
-          location: latest.get(u.user_id) || null,
-        }));
-      }
-
-      res.json({
+      const payload = {
         farmers,
-        teamMembers,
         office: OFFICE,
         totals: {
           farmers: farmers.length,
           completed: farmers.filter((r) => r.status === "Completed").length,
           pending: farmers.filter((r) => r.status !== "Completed").length,
-          team: teamMembers.filter((u) => u.location).length,
         },
-      });
+      };
+
+      res.setHeader("Cache-Control", "private, max-age=10, stale-while-revalidate=20");
+      res.json(payload);
     } catch (e) {
       console.error("Open map error:", e);
       res.status(500).json({ error: e.message || "Open map failed." });
@@ -3105,9 +3044,16 @@ app.post("/api/team-location", requireAuth, async (req, res) => {
     });
     if (error) throw new Error(error.message);
     /* Keep only recent location history for each user. */
-    await supabase.from("team_locations").delete()
+    // The new point is immediately visible; cleanup is deliberately not on
+    // the critical path of the live-location request.
+    supabase.from("team_locations").delete()
       .eq("user_id", req.user.id)
-      .lt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+      .lt("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .then(({ error }) => {
+        if (error) console.warn("Location history cleanup failed:", error.message);
+      });
+
+    teamLocationCache = { at: 0, data: null };
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -3116,33 +3062,9 @@ app.post("/api/team-location", requireAuth, async (req, res) => {
 
 app.get("/api/team-locations", requireAuth, async (req, res) => {
   try {
-    const { data: users, error: usersError } = await supabase
-      .from("profiles")
-      .select("id,user_id,email,full_name,team,role,is_active,last_seen_at")
-      .eq("is_active", true)
-      .order("full_name", { ascending: true });
-    if (usersError) throw new Error(usersError.message);
-
-    const { data: locations, error: locError } = await supabase
-      .from("team_locations")
-      .select("id,user_id,latitude,longitude,accuracy,created_at")
-      .order("created_at", { ascending: false })
-      .limit(1000);
-    if (locError) throw new Error(locError.message);
-
-    const latest = new Map();
-    (locations || []).forEach(x => {
-      if (!latest.has(x.user_id)) latest.set(x.user_id, x);
-    });
-
-    res.json({
-      users: (users || []).map(u => ({
-        id: u.id, user_id: u.user_id, email: u.email,
-        full_name: u.full_name, team: u.team, role: u.role,
-        last_seen_at: u.last_seen_at,
-        location: latest.get(u.user_id) || null
-      }))
-    });
+    const payload = await getLiveTeamPayload();
+    res.setHeader("Cache-Control", "private, max-age=3, stale-while-revalidate=5");
+    res.json(payload);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

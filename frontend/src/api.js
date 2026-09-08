@@ -4,6 +4,16 @@ const API =
   import.meta.env.VITE_API_BASE_URL ||
   "http://localhost:8787";
 
+// Keep the current access token in memory so ordinary API calls do not
+// repeatedly ask Supabase for the session from storage.
+let cachedAccessToken = "";
+
+if (supabase) {
+  supabase.auth.onAuthStateChange((_event, session) => {
+    cachedAccessToken = session?.access_token || "";
+  });
+}
+
 /* ======================================================
    Common API request
 ====================================================== */
@@ -13,14 +23,12 @@ async function request(path, options = {}, tokenOverride) {
     options.headers || {}
   );
 
-  let token = tokenOverride;
+  let token = tokenOverride || cachedAccessToken;
 
   if (!token && supabase) {
-    const { data } =
-      await supabase.auth.getSession();
-
-    token =
-      data.session?.access_token;
+    const { data } = await supabase.auth.getSession();
+    token = data.session?.access_token || "";
+    cachedAccessToken = token;
   }
 
   if (token) {
@@ -263,10 +271,11 @@ export const api = {
   ---------------------------------------------------- */
 
   downloadReport: async (params = {}) => {
-    let token = "";
-    if (supabase) {
+    let token = cachedAccessToken;
+    if (!token && supabase) {
       const { data } = await supabase.auth.getSession();
       token = data.session?.access_token || "";
+      cachedAccessToken = token;
     }
     const response = await fetch(`${API}/api/farmers/export.csv?${query(params)}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},

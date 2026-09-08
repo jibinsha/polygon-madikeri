@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Edit3, MapPin, Phone, RefreshCw, RotateCcw, Search, CalendarDays } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
@@ -43,23 +43,50 @@ export default function Farmers() {
   const [remarks, setRemarks] = useState("");
   const [busyBp, setBusyBp] = useState("");
   const [page, setPage] = useState(1);
+  const requestSeq = useRef(0);
+  const responseCache = useRef(new Map());
 
   const set = (key, value) => setFilters((x) => ({ ...x, [key]: value }));
 
-  const load = (pageOverride = page) => {
-    setLoading(true);
+  const load = async (pageOverride = page, { silent = false } = {}) => {
+    const currentSeq = ++requestSeq.current;
+    const params = { ...filters, page: pageOverride, page_size: 40 };
+    const cacheKey = JSON.stringify(params);
+    const cached = responseCache.current.get(cacheKey);
+
+    if (cached) {
+      setData(cached);
+      setError("");
+      setLoading(false);
+      // Cached filter results are shown immediately. Refresh in the
+      // background only when they are older than two minutes.
+      if (Date.now() - cached.__cachedAt < 120000) return;
+    }
+
+    if (!silent && !cached) setLoading(true);
     setError("");
-    api.farmers({ ...filters, page: pageOverride, page_size: 40 })
-      .then(setData)
-      .catch((e) => setError(e.message || "Unable to load farmers"))
-      .finally(() => setLoading(false));
+
+    try {
+      const result = await api.farmers(params);
+      if (currentSeq !== requestSeq.current) return;
+      responseCache.current.set(cacheKey, { ...result, __cachedAt: Date.now() });
+
+      // Keep the old list visible while the new filter result arrives.
+      setData(result);
+    } catch (e) {
+      if (currentSeq === requestSeq.current && e?.name !== "AbortError") {
+        setError(e.message || "Unable to load farmers");
+      }
+    } finally {
+      if (currentSeq === requestSeq.current) setLoading(false);
+    }
   };
 
   useEffect(() => {
     setPage(1);
-    const timer = setTimeout(() => load(1), 350);
+    const timer = setTimeout(() => load(1), 220);
     return () => clearTimeout(timer);
-  }, [filters.q, filters.team, filters.day, filters.status, filters.completion_date, filters.completion_from, filters.completion_to]);
+  }, [filters.q, filters.team, filters.day, filters.status, filters.completion_date, filters.completion_from, filters.completion_to, filters.trader]);
 
   useEffect(() => {
     if (page > 1) load(page);
@@ -86,6 +113,7 @@ export default function Farmers() {
     setError("");
     try {
       await api.setCompleted(farmer.bp, completing, completing ? farmer.remarks || "" : "");
+      responseCache.current.clear();
       await load();
     } catch (e) {
       setError(e.message || "Could not update visit status");
@@ -100,6 +128,7 @@ export default function Farmers() {
     try {
       await api.setCompleted(editing.bp, editing.status === "Completed", remarks);
       setEditing(null);
+      responseCache.current.clear();
       await load();
     } catch (e) {
       setError(e.message || "Could not save remarks");
@@ -116,7 +145,7 @@ export default function Farmers() {
         eyebrow="FIELD DATABASE"
         title="Farmers"
         description={`${data.total || 0} farmers match the current filters.`}
-        actions={<button className="icon-btn" onClick={load} title="Refresh"><RefreshCw size={16} /></button>}
+        actions={<button className="icon-btn" onClick={() => { responseCache.current.clear(); load(page, { silent: true }); }} title="Refresh"><RefreshCw size={16} /></button>}
       />
 
       <div className="farmer-filter-card card">

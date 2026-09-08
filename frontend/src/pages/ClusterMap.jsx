@@ -27,8 +27,8 @@ import "leaflet/dist/leaflet.css";
 
 const CENTER = [13.0714100566, 75.6442024220];
 const FARMER_FIT_MAX_ZOOM = 13;
-const TEAM_REFRESH_MS = 10000;
-const LOCATION_SEND_MS = 15000;
+const TEAM_REFRESH_MS = 5000;
+const LOCATION_SEND_MS = 10000;
 
 const mapsUrl = (lat, lon) =>
   `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lon}`)}`;
@@ -44,12 +44,12 @@ const directionsUrl = (lat, lon, origin) => {
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 };
 
-function FitOnce({ points }) {
+function FitOnce({ points, hasLocation }) {
   const map = useMap();
   const fitted = useRef(false);
 
   useEffect(() => {
-    if (fitted.current || !points?.length) return;
+    if (fitted.current || hasLocation || !points?.length) return;
     const valid = points.filter(
       (p) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon))
     );
@@ -64,7 +64,7 @@ function FitOnce({ points }) {
     } catch {
       // Keep the default Madikeri view if fitting fails.
     }
-  }, [points, map]);
+  }, [points, hasLocation, map]);
 
   return null;
 }
@@ -120,6 +120,19 @@ function RecenterControl({ location }) {
   );
 }
 
+function AutoLocate({ location }) {
+  const map = useMap();
+  const centered = useRef(false);
+
+  useEffect(() => {
+    if (!location || centered.current) return;
+    map.setView([location.lat, location.lon], 15, { animate: false });
+    centered.current = true;
+  }, [location, map]);
+
+  return null;
+}
+
 function ageLabel(iso) {
   if (!iso) return "No location";
   const mins = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
@@ -140,30 +153,38 @@ function distanceKm(a, b) {
 }
 
 function FarmerPopup({ farmer, myLocation }) {
-  const distance = distanceKm(myLocation, { lat: Number(farmer.lat), lon: Number(farmer.lon) });
+  const distance = distanceKm(
+    myLocation,
+    { lat: Number(farmer.lat), lon: Number(farmer.lon) }
+  );
+
   return (
     <div className="popup farmer-map-popup">
       <small>FARMER</small>
       <h3>{farmer.name || "Unnamed farmer"}</h3>
-      <code>{farmer.bp || "—"}</code>
-      <span className={`status ${farmer.status === "Completed" ? "done" : "pending"}`}>
-        {farmer.status === "Completed" ? "Completed" : "Pending"}
-      </span>
 
-      <div className="popup-grid">
-        <span>Trader</span><b>{farmer.trader || "—"}</b>
-        <span>Team</span><b>{farmer.team || "—"}</b>
-        <span>Day</span><b>{farmer.day || "—"}</b>
-        <span>Cluster</span><b>{farmer.cluster || "—"}</b>
-        <span>Village</span><b>{farmer.village || "—"}</b>
-        <span>Name in BPM</span><b>{farmer.name_in_bpm || "—"}</b>
-        <span>Farm</span><b>{farmer.farm_name || "—"}</b>
-        <span>Area</span><b>{farmer.area_under_rejuvenation || "—"}</b>
-        {distance != null && <><span>Distance</span><b>{distance < 1 ? `${Math.round(distance * 1000)} m` : `${distance.toFixed(1)} km`}</b></>}
-        {farmer.completion_date && <><span>Completed</span><b>{new Date(farmer.completion_date).toLocaleString()}</b></>}
+      <div className="popup-grid farmer-popup-details">
+        <span>Farm name</span><b>{farmer.farm_name || "—"}</b>
+        <span>Area under rejuvenation</span><b>{farmer.area_under_rejuvenation || "—"}</b>
+        {distance != null && (
+          <>
+            <span>Distance</span>
+            <b>{distance < 1 ? `${Math.round(distance * 1000)} m` : `${distance.toFixed(1)} km`}</b>
+          </>
+        )}
+        {farmer.completion_date && (
+          <>
+            <span>Completed</span>
+            <b>{new Date(farmer.completion_date).toLocaleString()}</b>
+          </>
+        )}
+        {farmer.completion_by_name && (
+          <>
+            <span>Enumerator</span>
+            <b>{farmer.completion_by_name}</b>
+          </>
+        )}
       </div>
-
-      {farmer.remarks && <div className="popup-remarks"><span>Remarks</span><b>{farmer.remarks}</b></div>}
 
       <div className="popup-actions">
         {farmer.phone ? (
@@ -179,11 +200,6 @@ function FarmerPopup({ farmer, myLocation }) {
             rel="noreferrer"
           >
             <Navigation size={13} /> Navigate
-          </a>
-        ) : null}
-        {farmer.lat != null && farmer.lon != null ? (
-          <a className="popup-action map-link" href={mapsUrl(farmer.lat, farmer.lon)} target="_blank" rel="noreferrer">
-            <MapPinned size={13} /> Google Maps
           </a>
         ) : null}
       </div>
@@ -207,7 +223,6 @@ export default function ClusterMap() {
     try {
       const result = await api.openMap();
       setData({ farmers: result.farmers || [], office: result.office || null });
-      setTeam(result.teamMembers || []);
     } catch (e) {
       setError(e?.message || "Unable to load map.");
     } finally {
@@ -251,15 +266,31 @@ export default function ClusterMap() {
   };
 
   useEffect(() => {
+    // Load farmer points first; team positions are independent and refresh
+    // separately so the map becomes usable as soon as the farmer payload arrives.
     loadMap();
+    loadTeam();
 
     const teamTimer = setInterval(loadTeam, TEAM_REFRESH_MS);
 
     if (navigator.geolocation) {
+      const locationOptions = {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 12000,
+      };
+
+      // Get a position immediately when Open Map opens, then keep it live.
+      navigator.geolocation.getCurrentPosition(
+        sendMyLocation,
+        (geoError) => console.warn("Initial location unavailable:", geoError?.message),
+        locationOptions
+      );
+
       watchId.current = navigator.geolocation.watchPosition(
         sendMyLocation,
-        (geoError) => console.warn("Location unavailable:", geoError?.message),
-        { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+        (geoError) => console.warn("Live location unavailable:", geoError?.message),
+        locationOptions
       );
     }
 
@@ -300,7 +331,8 @@ export default function ClusterMap() {
       <section className="open-map-canvas">
         <MapContainer center={CENTER} zoom={10} className="leaflet-map" preferCanvas zoomControl>
           <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          <FitOnce points={farmers} />
+          <FitOnce points={farmers} hasLocation={Boolean(myLocation)} />
+          <AutoLocate location={myLocation} />
           <LocateControl />
           <FullscreenControl />
           <RecenterControl location={myLocation} />
@@ -335,8 +367,8 @@ export default function ClusterMap() {
                 center={[lat, lon]}
                 radius={9}
                 pathOptions={{
-                  color: fresh ? "#7144a5" : "#8d8d8d",
-                  fillColor: fresh ? "#9c62d2" : "#a6aaa8",
+                  color: "#7144a5",
+                  fillColor: "#9c62d2",
                   fillOpacity: 0.95,
                   weight: 3,
                 }}
