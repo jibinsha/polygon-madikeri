@@ -1429,6 +1429,7 @@ function farmersCsv(rows) {
     "Longitude",
     "Status",
     "Completion Date",
+    "Completed By / Enumerator",
     "Remarks",
   ];
 
@@ -1458,6 +1459,7 @@ function farmersCsv(rows) {
         r.lon,
         r.status,
         r.completion_date,
+        r.completion_by_name,
         r.remarks,
       ]
         .map(csvEscape)
