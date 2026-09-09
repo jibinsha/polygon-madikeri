@@ -10,7 +10,6 @@ import AdminAudit from "./pages/AdminAudit";
 import TeamLocation from "./pages/TeamLocation";
 import DataManager from "./pages/DataManager";
 import {AuthProvider,RequireAdmin,RequireAuth,useAuth} from "./auth";
-import {api} from "./api";
 
 const fieldLinks=[
  {to:"/",label:"Dashboard",icon:LayoutDashboard,end:true},
@@ -49,11 +48,11 @@ function Shell(){
  return <div className="app">
   <aside className={`sidebar ${open?"open":""}`}>
    <div className="brand"><div className="brand-mark">P</div><div><strong>Polygon Project</strong><span>{adminArea?"Admin Control":"Madikeri Operations"}</span></div><button className="mobile-close" onClick={()=>setOpen(false)}><X size={20}/></button></div>
-   <nav>{links.map(({to,label,icon:Icon,end})=><NavLink key={to} to={to} end={end} onMouseEnter={()=>api.prefetchRoute(to)} onTouchStart={()=>api.prefetchRoute(to)} className={({isActive})=>isActive?"nav-item active":"nav-item"}><Icon size={18}/><span>{label}</span></NavLink>)}</nav>
+   <nav>{links.map(({to,label,icon:Icon,end})=><NavLink key={to} to={to} end={end} className={({isActive})=>isActive?"nav-item active":"nav-item"}><Icon size={18}/><span>{label}</span></NavLink>)}</nav>
    {profile?.role === "admin" && (adminArea ? (
-     <NavLink to="/" onMouseEnter={()=>api.prefetchRoute("/")} onTouchStart={()=>api.prefetchRoute("/")} className="portal-switch"><ArrowLeftRight size={15}/><span>Enumerator Portal</span></NavLink>
+     <NavLink to="/" className="portal-switch"><ArrowLeftRight size={15}/><span>Enumerator Portal</span></NavLink>
    ) : (
-     <NavLink to="/admin" onMouseEnter={()=>api.prefetchRoute("/admin")} onTouchStart={()=>api.prefetchRoute("/admin")} className="portal-switch"><ArrowLeftRight size={15}/><span>Admin Portal</span></NavLink>
+     <NavLink to="/admin" className="portal-switch"><ArrowLeftRight size={15}/><span>Admin Portal</span></NavLink>
    ))}
    {adminArea&&<div className="admin-nav-note"><ShieldCheck size={15}/><span>Administrator</span></div>}
    <div className="sidebar-footer"><div className="live-dot"/><span>{profile?.full_name||profile?.email||"Signed in"}</span><button className="logout-btn" title="Sign out" onClick={signOut}><LogOut size={15}/></button></div>

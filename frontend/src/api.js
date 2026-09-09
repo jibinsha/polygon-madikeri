@@ -11,8 +11,6 @@ let cachedAccessToken = "";
 let cachedUserId = "";
 let syncInProgress = false;
 let groupSyncInProgress = false;
-const MEMORY_GET_CACHE = new Map();
-const MEMORY_GET_TTL_MS = 45000;
 const OFFLINE_MASTER_KEY = "farmers-master";
 const OFFLINE_QUEUE_KEY = "completion-queue";
 const OFFLINE_GROUPS_KEY = "farmer-groups";
@@ -329,13 +327,6 @@ async function request(path, options = {}, tokenOverride) {
 
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  // Navigation cache: pages that were prefetched (or recently loaded) can
-  // render immediately instead of waiting for the network on every click.
-  if (method === "GET") {
-    const mem = MEMORY_GET_CACHE.get(path);
-    if (mem && Date.now() - mem.cachedAt < MEMORY_GET_TTL_MS) return mem.data;
-  }
-
   try {
     let response = await fetch(`${API}${path}`, { ...options, headers });
 
@@ -359,7 +350,6 @@ async function request(path, options = {}, tokenOverride) {
     }
 
     if (method === "GET") {
-      MEMORY_GET_CACHE.set(path, { data, cachedAt: Date.now() });
       cacheApi(path, data).catch(() => {});
     }
     return data;
@@ -405,28 +395,6 @@ function query(params = {}) {
 export const api = {
 
   base: API,
-
-  // Warm the next page before the user taps it. This does not alter any
-  // workflow; it only makes navigation use already-fetched data.
-  prefetchRoute: (route) => {
-    if (!navigator.onLine) return;
-    const paths = {
-      "/": ["/api/dashboard?"],
-      "/farmers": ["/api/farmers?page=1&page_size=40"],
-      "/cluster-map": ["/api/open-map"],
-      "/team-location": ["/api/team-locations"],
-      "/admin": ["/api/admin/overview"],
-      "/admin/users": ["/api/admin/users"],
-      "/admin/data": [],
-      "/admin/audit": ["/api/admin/audit?"],
-      "/admin/team-location": ["/api/team-locations"],
-    }[route] || [];
-    paths.forEach((path) => {
-      const mem = MEMORY_GET_CACHE.get(path);
-      if (mem && Date.now() - mem.cachedAt < MEMORY_GET_TTL_MS) return;
-      request(path).catch(() => {});
-    });
-  },
 
   /* ----------------------------------------------------
      Private farmer groups
