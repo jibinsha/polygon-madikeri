@@ -223,20 +223,30 @@ export default function Farmers() {
       };
     });
 
-    try {
-      await api.setCompleted(farmer.bp, completing, completing ? farmer.remarks || "" : "");
-      responseCache.current.clear();
+    // The card has already been updated optimistically above. Do not keep
+    // the button disabled while the network/database request is running.
+    // This is especially important in low-network field conditions.
+    setBusyBp("");
 
-      // Reconcile in the background without making the user wait for the
-      // card to change state.
-      load(page, { silent: true });
-    } catch (e) {
-      // Restore the exact list if the server update failed.
-      setData(previousData);
-      setError(e.message || "Could not update visit status");
-    } finally {
-      setBusyBp("");
-    }
+    // Persist in the background. The user does not need to wait for Supabase
+    // (or IndexedDB when offline) before continuing to the next farmer.
+    api.setCompleted(farmer.bp, completing, completing ? farmer.remarks || "" : "")
+      .then(() => {
+        responseCache.current.clear();
+        // Reconcile silently after the server confirms the change.
+        load(page, { silent: true });
+      })
+      .catch((e) => {
+        // Restore only if this farmer has not been changed again since this
+        // request started. This prevents an older failed request from
+        // overwriting a newer Complete/Reopen action.
+        setData((current) => {
+          const currentFarmer = (current.farmers || []).find((f) => f.bp === farmer.bp);
+          const stillSameAction = currentFarmer && currentFarmer.status === nextStatus;
+          return stillSameAction ? previousData : current;
+        });
+        setError(e.message || "Could not update visit status");
+      });
   };
 
   const saveRemarks = async () => {
