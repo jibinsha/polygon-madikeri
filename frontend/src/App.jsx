@@ -10,6 +10,7 @@ import AdminAudit from "./pages/AdminAudit";
 import TeamLocation from "./pages/TeamLocation";
 import DataManager from "./pages/DataManager";
 import {AuthProvider,RequireAdmin,RequireAuth,useAuth} from "./auth";
+import { api } from "./api";
 
 const fieldLinks=[
  {to:"/",label:"Dashboard",icon:LayoutDashboard,end:true},
@@ -24,6 +25,65 @@ const adminLinks=[
  {to:"/admin/audit",label:"Activity",icon:Activity},
  {to:"/admin/team-location",label:"Team Location",icon:MapPin},
 ];
+
+function LocationTracker(){
+ const {profile}=useAuth();
+ const lastSent=React.useRef(0);
+ const watchRef=React.useRef(null);
+
+ useEffect(()=>{
+  if(!profile?.user_id || !navigator.geolocation) return undefined;
+
+  let alive=true;
+  const options={enableHighAccuracy:true,maximumAge:10000,timeout:12000};
+
+  const send=(position)=>{
+   if(!alive) return;
+   const coords=position?.coords;
+   if(!coords) return;
+   const latitude=Number(coords.latitude);
+   const longitude=Number(coords.longitude);
+   const accuracy=Number.isFinite(coords.accuracy)?Number(coords.accuracy):null;
+   if(!Number.isFinite(latitude)||!Number.isFinite(longitude)) return;
+
+   const now=Date.now();
+   const detail={latitude,longitude,accuracy,updatedAt:new Date(now).toISOString()};
+   window.__polygonLatestLocation=detail;
+   window.dispatchEvent(new CustomEvent("polygon-location-updated",{detail}));
+
+   // Keep the database traffic low while still giving the team a live field
+   // position whenever the authenticated app is actively open.
+   if(!navigator.onLine || now-lastSent.current<15000) return;
+   lastSent.current=now;
+   api.updateTeamLocation({latitude,longitude,accuracy}).catch(()=>{});
+  };
+
+  const requestPosition=()=>{
+   if(document.visibilityState!=="visible" || !navigator.onLine) return;
+   navigator.geolocation.getCurrentPosition(send,()=>{},options);
+  };
+
+  navigator.geolocation.getCurrentPosition(send,()=>{},options);
+  watchRef.current=navigator.geolocation.watchPosition(send,()=>{},options);
+
+  const timer=window.setInterval(requestPosition,15000);
+  const onVisible=()=>{if(document.visibilityState==="visible") requestPosition();};
+  const onOnline=()=>requestPosition();
+  document.addEventListener("visibilitychange",onVisible);
+  window.addEventListener("online",onOnline);
+
+  return()=>{
+   alive=false;
+   window.clearInterval(timer);
+   document.removeEventListener("visibilitychange",onVisible);
+   window.removeEventListener("online",onOnline);
+   if(watchRef.current!=null) navigator.geolocation.clearWatch(watchRef.current);
+   watchRef.current=null;
+  };
+ },[profile?.user_id]);
+
+ return null;
+}
 
 function Shell(){
  const [open,setOpen]=useState(false);
@@ -46,6 +106,7 @@ function Shell(){
  const adminArea=location.pathname.startsWith("/admin");
  const links=adminArea?adminLinks:fieldLinks;
  return <div className="app">
+  <LocationTracker/>
   <aside className={`sidebar ${open?"open":""}`}>
    <div className="brand"><div className="brand-mark">P</div><div><strong>Polygon Project</strong><span>{adminArea?"Admin Control":"Madikeri Operations"}</span></div><button className="mobile-close" onClick={()=>setOpen(false)}><X size={20}/></button></div>
    <nav>{links.map(({to,label,icon:Icon,end})=><NavLink key={to} to={to} end={end} className={({isActive})=>isActive?"nav-item active":"nav-item"}><Icon size={18}/><span>{label}</span></NavLink>)}</nav>

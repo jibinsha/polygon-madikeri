@@ -29,7 +29,6 @@ import "leaflet/dist/leaflet.css";
 const CENTER = [13.0714100566, 75.6442024220];
 const FARMER_FIT_MAX_ZOOM = 13;
 const TEAM_REFRESH_MS = 5000;
-const LOCATION_SEND_MS = 10000;
 
 function traderFromBp(bp) {
   const parts = String(bp || "").split("-");
@@ -219,7 +218,7 @@ function FarmerPopup({ farmer, myLocation }) {
 export default function ClusterMap() {
   const [data, setData] = useState({ farmers: [], office: null });
   const [team, setTeam] = useState([]);
-  const [myLocation, setMyLocation] = useState(null);
+  const [myLocation, setMyLocation] = useState(() => window.__polygonLatestLocation || null);
   const [loading, setLoading] = useState(true);
   const [refreshingTeam, setRefreshingTeam] = useState(false);
   const [error, setError] = useState("");
@@ -227,8 +226,6 @@ export default function ClusterMap() {
   const [traderFilter, setTraderFilter] = useState("");
   const [groupFilter, setGroupFilter] = useState("");
   const [groups, setGroups] = useState([]);
-  const watchId = useRef(null);
-  const lastSentAt = useRef(0);
 
   const loadMap = async () => {
     setLoading(true);
@@ -265,28 +262,6 @@ export default function ClusterMap() {
     }
   };
 
-  const sendMyLocation = async (position) => {
-    const next = {
-      lat: position.coords.latitude,
-      lon: position.coords.longitude,
-      accuracy: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
-      updatedAt: new Date().toISOString(),
-    };
-    setMyLocation(next);
-
-    if (Date.now() - lastSentAt.current < LOCATION_SEND_MS) return;
-    lastSentAt.current = Date.now();
-    try {
-      await api.updateTeamLocation({
-        latitude: next.lat,
-        longitude: next.lon,
-        accuracy: next.accuracy,
-      });
-    } catch (e) {
-      console.warn("Unable to share current location:", e);
-    }
-  };
-
   useEffect(() => {
     // Load farmer points first; team positions are independent and refresh
     // separately so the map becomes usable as soon as the farmer payload arrives.
@@ -296,30 +271,21 @@ export default function ClusterMap() {
 
     const teamTimer = setInterval(loadTeam, TEAM_REFRESH_MS);
 
-    if (navigator.geolocation) {
-      const locationOptions = {
-        enableHighAccuracy: true,
-        maximumAge: 5000,
-        timeout: 12000,
-      };
-
-      // Get a position immediately when Open Map opens, then keep it live.
-      navigator.geolocation.getCurrentPosition(
-        sendMyLocation,
-        (geoError) => console.warn("Initial location unavailable:", geoError?.message),
-        locationOptions
-      );
-
-      watchId.current = navigator.geolocation.watchPosition(
-        sendMyLocation,
-        (geoError) => console.warn("Live location unavailable:", geoError?.message),
-        locationOptions
-      );
-    }
+    const onLocation = (event) => {
+      const p = event?.detail;
+      if (!p) return;
+      setMyLocation({
+        lat: p.latitude,
+        lon: p.longitude,
+        accuracy: p.accuracy,
+        updatedAt: p.updatedAt || new Date().toISOString(),
+      });
+    };
+    window.addEventListener("polygon-location-updated", onLocation);
 
     return () => {
       clearInterval(teamTimer);
-      if (watchId.current != null) navigator.geolocation?.clearWatch(watchId.current);
+      window.removeEventListener("polygon-location-updated", onLocation);
     };
   }, []);
 

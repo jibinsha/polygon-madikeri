@@ -830,13 +830,14 @@ async function allFarmersFromDb() {
   ------------------------------- */
 
   // These datasets are independent, so fetch them concurrently.
-  const [data, done] = await Promise.all([
+  const [data, done, profiles] = await Promise.all([
     fetchAllRows("farmers", "*", "id"),
     fetchAllRows(
       "completed_farmers",
       "bp_number,remarks,completed_at,completed_by,completed_by_email",
       "bp_number"
     ),
+    allProfiles(),
   ]);
 
   /*
@@ -844,11 +845,6 @@ async function allFarmersFromDb() {
     We intentionally do this at read time so existing completed
     records (created before this feature) also show the user's name.
   */
-  let profiles = [];
-
-  if (done.length) {
-    profiles = await allProfiles();
-  }
 
   const profileById = new Map(
     profiles.map((p) => [
@@ -2099,6 +2095,7 @@ app.get(
       const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
       const start = (page - 1) * pageSize;
 
+      res.setHeader("Cache-Control", "private, max-age=5, stale-while-revalidate=15");
       res.json({
         farmers: rows.slice(start, start + pageSize),
         total: rows.length,
@@ -2404,7 +2401,7 @@ async function allOpenMapFarmers() {
     return data;
   }
 
-  const [rows, done] = await Promise.all([
+  const [rows, done, profiles] = await Promise.all([
     // Keep the Open Map compatible with older Supabase databases where
     // the optional display columns may not have been added yet. The master
     // CSV below supplies farm name/area when those columns are unavailable.
@@ -2418,10 +2415,8 @@ async function allOpenMapFarmers() {
       "bp_number,completed_at,completed_by,completed_by_email",
       "bp_number"
     ),
+    allProfiles(),
   ]);
-
-  let profiles = [];
-  if (done.length) profiles = await allProfiles();
 
   const profileById = new Map(
     profiles.map((p) => [

@@ -227,9 +227,11 @@ export default function Farmers() {
       await api.setCompleted(farmer.bp, completing, completing ? farmer.remarks || "" : "");
       responseCache.current.clear();
 
-      // Reconcile in the background without making the user wait for the
-      // card to change state.
-      load(page, { silent: true });
+      // The visible card/counts are already updated optimistically. Avoid an
+      // immediate second request here; the next load gets fresh server data.
+      // A delayed reconciliation is kept as a safety net after the write has
+      // had time to settle.
+      window.setTimeout(() => load(page, { silent: true }), 1500);
     } catch (e) {
       // Restore the exact list if the server update failed.
       setData(previousData);
@@ -257,7 +259,7 @@ export default function Farmers() {
       await api.setCompleted(editing.bp, editing.status === "Completed", remarks);
       setEditing(null);
       responseCache.current.clear();
-      load(page, { silent: true });
+      window.setTimeout(() => load(page, { silent: true }), 1000);
     } catch (e) {
       setData(previousData);
       setError(e.message || "Could not save remarks");

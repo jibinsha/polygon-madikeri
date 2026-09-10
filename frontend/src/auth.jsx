@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabase";
-import { api } from "./api";
+import { api, refreshSessionOnce } from "./api";
 
 const AuthContext = createContext(null);
 const PROFILE_STORAGE_KEY = "polygon-madikeri-profile";
@@ -60,10 +60,10 @@ export function AuthProvider({ children }) {
       loadedUserId.current = userId;
       setProfile(nextProfile);
     } catch (e) {
-      // Recover transparently if the stored access token expired.
+      // Use one shared refresh operation. This prevents getSession/authMe and
+      // the API layer from racing two refresh-token requests.
       try {
-        const { data: refreshed } = await supabase.auth.refreshSession();
-        const fresh = refreshed.session;
+        const fresh = await refreshSessionOnce();
         if (fresh?.access_token) {
           setSession(fresh);
           const r = await api.authMe(fresh.access_token);
@@ -75,7 +75,7 @@ export function AuthProvider({ children }) {
           return;
         }
       } catch (refreshError) {
-        console.error(refreshError);
+        console.warn("Session refresh failed:", refreshError?.message || refreshError);
       }
 
       if (!navigator.onLine) {
@@ -90,6 +90,10 @@ export function AuthProvider({ children }) {
       console.error(e);
       loadedUserId.current = "";
       setProfile(null);
+      setSession(null);
+      // Clear a genuinely invalid persisted Supabase session so the app
+      // never gets stuck on "Preparing account…" on the next reload.
+      try { await supabase.auth.signOut({ scope: "local" }); } catch {}
     } finally {
       setLoading(false);
     }

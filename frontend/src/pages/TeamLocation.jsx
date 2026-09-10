@@ -10,13 +10,25 @@ const ago=iso=>{if(!iso)return "No location";const mins=Math.max(0,Math.floor((D
 function Fit({users}){const map=useMap();useEffect(()=>{const p=users.map(u=>u.location).filter(Boolean);if(p.length)map.fitBounds(p.map(x=>[x.latitude,x.longitude]),{padding:[40,40],maxZoom:14})},[users,map]);return null}
 export default function TeamLocation(){
  const [users,setUsers]=useState([]),[loading,setLoading]=useState(true),[error,setError]=useState(""),[sharing,setSharing]=useState(false),[message,setMessage]=useState("");
- const load=()=>{setLoading(true);setError("");api.teamLocations().then(r=>setUsers(r.users||[])).catch(e=>setError(e.message)).finally(()=>setLoading(false))};
+ const load=(silent=false)=>{if(!silent)setLoading(true);setError("");api.teamLocations().then(r=>setUsers(r.users||[])).catch(e=>setError(e.message)).finally(()=>{if(!silent)setLoading(false)})};
  const sendLocation=()=>{if(!navigator.geolocation){setError("This device does not support location sharing.");return;}setMessage("Getting your location…");navigator.geolocation.getCurrentPosition(async p=>{try{await api.updateTeamLocation({latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy});setSharing(true);setMessage("Your location is being shared while this app is open.");load()}catch(e){setError(e.message)}},e=>setError(e.message||"Location permission was denied."),{enableHighAccuracy:true,maximumAge:30000,timeout:15000})};
- useEffect(()=>{load();sendLocation();const t=setInterval(()=>sendLocation(),60000);return()=>clearInterval(t)},[]);
+ useEffect(()=>{
+  load();
+  const poll=window.setInterval(()=>load(true),10000);
+  const onLocation=(event)=>{
+    setSharing(true);
+    setMessage("Your location is being shared automatically while this app is open.");
+  };
+  window.addEventListener("polygon-location-updated",onLocation);
+  return()=>{
+    window.clearInterval(poll);
+    window.removeEventListener("polygon-location-updated",onLocation);
+  };
+ },[]);
  const mapped=useMemo(()=>users.filter(u=>u.location),[users]);
  return <div className="page team-location-page">
   <PageHead eyebrow="FIELD TEAM" title="Team Location" description="See the latest shared location of active team members." actions={<button className="icon-btn" onClick={load}><RefreshCw size={16}/></button>}/>
-  <div className="team-location-note"><MapPin size={15}/><div><b>Location sharing</b><span>Keep this app open and allow location access so teammates can see your latest position.</span></div><button className="secondary-btn" onClick={sendLocation}><LocateFixed size={14}/>{sharing?"Update location":"Share my location"}</button></div>
+  <div className="team-location-note"><MapPin size={15}/><div><b>Location sharing</b><span>Location is fetched automatically while this app is open. Allow location access so teammates can see your latest position.</span></div><button className="secondary-btn" onClick={sendLocation}><LocateFixed size={14}/>{sharing?"Update now":"Share my location"}</button></div>
   {message&&<div className="info-banner success">{message}</div>}
   {error&&<ErrorCard message={error} onRetry={load}/>}
   <div className="team-location-layout">

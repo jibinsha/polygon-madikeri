@@ -11,12 +11,34 @@ let cachedAccessToken = "";
 let cachedUserId = "";
 let syncInProgress = false;
 let groupSyncInProgress = false;
+let refreshPromise = null;
 const OFFLINE_MASTER_KEY = "farmers-master";
 const OFFLINE_QUEUE_KEY = "completion-queue";
 const OFFLINE_GROUPS_KEY = "farmer-groups";
 const OFFLINE_GROUP_QUEUE_KEY = "farmer-group-queue";
 const OFFLINE_API_PREFIX = "api:";
 const userScopedKey = (base) => `${base}:${cachedUserId || "unknown-user"}`;
+const memoryGetCache = new Map();
+const MEMORY_CACHE_TTL_MS = 15000;
+
+function memoryCacheTtl(path) {
+  if (path.startsWith("/api/team-locations")) return 3000;
+  if (path.startsWith("/api/farmer-groups")) return 30000;
+  if (path.startsWith("/api/open-map")) return 15000;
+  if (path.startsWith("/api/dashboard")) return 10000;
+  if (path.startsWith("/api/farmers")) return 10000;
+  return MEMORY_CACHE_TTL_MS;
+}
+
+function invalidateMemoryCache(prefixes = []) {
+  if (!prefixes.length) {
+    memoryGetCache.clear();
+    return;
+  }
+  for (const key of memoryGetCache.keys()) {
+    if (prefixes.some((prefix) => key.startsWith(prefix))) memoryGetCache.delete(key);
+  }
+}
 
 const isNetworkError = (error) => {
   if (!navigator.onLine) return true;
@@ -304,8 +326,10 @@ if (typeof window !== "undefined") {
 
 if (supabase) {
   supabase.auth.onAuthStateChange((_event, session) => {
+    const nextUserId = session?.user?.id || "";
+    if (nextUserId !== cachedUserId) memoryGetCache.clear();
     cachedAccessToken = session?.access_token || "";
-    cachedUserId = session?.user?.id || "";
+    cachedUserId = nextUserId;
   });
 }
 
@@ -313,7 +337,29 @@ if (supabase) {
    Common API request
 ====================================================== */
 
-async function request(path, options = {}, tokenOverride) {
+export async function refreshSessionOnce() {
+  if (!supabase) return null;
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = (async () => {
+    try {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) throw error;
+      const session = data?.session || null;
+      if (session?.access_token) {
+        cachedAccessToken = session.access_token;
+        cachedUserId = session.user?.id || cachedUserId;
+      }
+      return session;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+async function request(path, options = {}, tokenOverride, allowRefresh = true) {
   const headers = new Headers(options.headers || {});
   const method = String(options.method || "GET").toUpperCase();
   let token = tokenOverride || cachedAccessToken;
@@ -327,17 +373,28 @@ async function request(path, options = {}, tokenOverride) {
 
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
+  const cacheKey = `${cachedUserId || "unknown-user"}:${path}`;
+  if (method === "GET") {
+    const hit = memoryGetCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < memoryCacheTtl(path)) return hit.data;
+  }
+
   try {
     let response = await fetch(`${API}${path}`, { ...options, headers });
 
-    if (response.status === 401 && supabase) {
-      const { data: refreshed } = await supabase.auth.refreshSession();
-      const freshToken = refreshed.session?.access_token;
-      if (freshToken) {
-        headers.set("Authorization", `Bearer ${freshToken}`);
-        cachedAccessToken = freshToken;
-        cachedUserId = refreshed.session?.user?.id || cachedUserId;
-        response = await fetch(`${API}${path}`, { ...options, headers });
+    if (response.status === 401 && supabase && allowRefresh) {
+      try {
+        const refreshed = await refreshSessionOnce();
+        const freshToken = refreshed?.access_token;
+        if (freshToken) {
+          headers.set("Authorization", `Bearer ${freshToken}`);
+          cachedAccessToken = freshToken;
+          cachedUserId = refreshed.user?.id || cachedUserId;
+          response = await fetch(`${API}${path}`, { ...options, headers });
+        }
+      } catch {
+        // Let the original 401 surface. AuthProvider will decide whether
+        // the session can be recovered or the user must sign in again.
       }
     }
 
@@ -350,7 +407,15 @@ async function request(path, options = {}, tokenOverride) {
     }
 
     if (method === "GET") {
+      memoryGetCache.set(cacheKey, { at: Date.now(), data });
       cacheApi(path, data).catch(() => {});
+    } else {
+      invalidateMemoryCache([
+        "/api/farmers",
+        "/api/dashboard",
+        "/api/open-map",
+        "/api/team-locations",
+      ]);
     }
     return data;
   } catch (error) {
@@ -522,7 +587,9 @@ export const api = {
           body: JSON.stringify({ completed, remarks }),
         }
       );
-      await updateOfflineCompletion(bp, completed, remarks);
+      // The server has already committed the status. Keep the field action
+      // fast; update the offline snapshot in the background.
+      updateOfflineCompletion(bp, completed, remarks).catch(() => {});
       return result;
     } catch (error) {
       if (isNetworkError(error)) {
@@ -722,7 +789,8 @@ export const api = {
     request(
       "/api/auth/me",
       {},
-      token
+      token,
+      false
     ),
 
   authLogin: () =>
