@@ -181,9 +181,11 @@ export default function Farmers() {
     setBusyBp(farmer.bp);
     setError("");
 
-    // Update the visible card immediately. The server remains the source of
-    // truth; a background refresh below reconciles the list and counts.
+    // Optimistic UI: the card changes immediately. Do not reload the page/list
+    // after the write; that used to overwrite the new state with an older
+    // cached/server response and made Complete/Reopen appear to "fall back".
     setData((current) => {
+      const wasVisible = (current.farmers || []).some((f) => f.bp === farmer.bp);
       const nextFarmers = (current.farmers || [])
         .map((f) =>
           f.bp === farmer.bp
@@ -200,40 +202,40 @@ export default function Farmers() {
           return true;
         });
 
+      const removedFromCurrentFilter = wasVisible && nextFarmers.length < (current.farmers || []).length;
+
       const statusCounts = current.statusCounts
         ? {
             ...current.statusCounts,
-            all: current.statusCounts.all + (nextFarmers.length === (current.farmers || []).length ? 0 : -1),
-            completed: Math.max(
-              0,
-              current.statusCounts.completed + (completing ? 1 : -1)
-            ),
-            pending: Math.max(
-              0,
-              current.statusCounts.pending + (completing ? -1 : 1)
-            ),
+            completed: Math.max(0, current.statusCounts.completed + (completing ? 1 : -1)),
+            pending: Math.max(0, current.statusCounts.pending + (completing ? -1 : 1)),
           }
         : current.statusCounts;
 
       return {
         ...current,
         farmers: nextFarmers,
-        total: current.total + (nextFarmers.length === (current.farmers || []).length ? 0 : -1),
+        total: removedFromCurrentFilter ? Math.max(0, current.total - 1) : current.total,
         statusCounts,
       };
     });
 
     try {
-      await api.setCompleted(farmer.bp, completing, completing ? farmer.remarks || "" : "");
-      responseCache.current.clear();
+      // The API handles online writes and offline queuing. Once it resolves,
+      // keep the already-updated UI; no delayed load/re-fetch is needed.
+      await api.setCompleted(
+        farmer.bp,
+        completing,
+        completing ? farmer.remarks || "" : ""
+      );
 
-      // The visible card/counts are already updated optimistically. Avoid an
-      // immediate second request here; the next load gets fresh server data.
-      // A delayed reconciliation is kept as a safety net after the write has
-      // had time to settle.
-      window.setTimeout(() => load(page, { silent: true }), 1500);
+      // Remove stale GET responses so a future navigation/refresh fetches the
+      // committed state, without disturbing the currently visible card.
+      responseCache.current.clear();
     } catch (e) {
-      // Restore the exact list if the server update failed.
+      // A real server/auth rejection should restore the exact previous state.
+      // Network/offline actions are queued by api.setCompleted and therefore
+      // normally do not reach this rollback path.
       setData(previousData);
       setError(e.message || "Could not update visit status");
     } finally {
