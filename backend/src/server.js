@@ -306,6 +306,10 @@ const demoDone = new Map([
   ["IN4C5-BP1010-VC1010", "Demo completed"],
 ]);
 
+let demoCompletionEventId = 0;
+const demoCompletionEvents = [];
+
+
 const demoClusterPoints = [
   ["12", "Team 1", "1", 12.741449, 75.761295, "#4db68c"],
   ["12", "Team 1", "1", 12.729926, 75.745699, "#4db68c"],
@@ -2590,6 +2594,92 @@ app.get(
 );
 
 /* =======================================================
+   COMPLETION CHANGE FEED
+
+   Small, ordered event stream used by the field apps for
+   silent cross-device status synchronization. It never
+   reloads the page and it never touches the local
+   Complete/Reopen queue.
+======================================================= */
+
+app.get(
+  "/api/completion-changes",
+  async (req, res) => {
+    try {
+      const sinceRaw = Number.parseInt(req.query.since_id, 10);
+      const limitRaw = Number.parseInt(req.query.limit, 10);
+      const sinceId = Number.isFinite(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
+      const sinceTime = clean(req.query.since_time);
+      const limit = Math.min(
+        500,
+        Math.max(1, Number.isFinite(limitRaw) ? limitRaw : 500)
+      );
+
+      if (!hasDb) {
+        const events = demoCompletionEvents
+          .filter((event) => sinceId > 0 ? event.id > sinceId : (!sinceTime || event.changed_at >= sinceTime))
+          .slice(0, limit);
+        const nextId = events.length ? events[events.length - 1].id : sinceId;
+        return res.json({
+          events,
+          next_id: nextId,
+          has_more: demoCompletionEvents.some((event) => event.id > nextId),
+        });
+      }
+
+      let eventQuery = supabase
+        .from("completion_events")
+        .select(
+          "id,bp_number,completed,action,remarks,completed_at,completed_by,completed_by_email,changed_at"
+        )
+        .order("id", { ascending: true })
+        .limit(limit);
+
+      // On the first poll, use the app-start timestamp instead of replaying
+      // the entire historical event table. This closes the small race between
+      // the initial page load and the first 3-second background poll.
+      if (sinceId === 0 && sinceTime) {
+        eventQuery = eventQuery.gte("changed_at", sinceTime);
+      } else {
+        eventQuery = eventQuery.gt("id", sinceId);
+      }
+
+      const { data, error } = await eventQuery;
+
+      if (error) throw new Error(error.message);
+
+      const events = (data || []).map((event) => ({
+        id: Number(event.id),
+        bp: clean(event.bp_number),
+        completed: Boolean(event.completed),
+        action: clean(event.action) || (event.completed ? "completed" : "reopened"),
+        remarks: clean(event.remarks),
+        completion_date: event.completed_at || null,
+        completed_by: event.completed_by || null,
+        completed_by_email: clean(event.completed_by_email).toLowerCase(),
+        changed_at: event.changed_at || null,
+      }));
+
+      const nextId = events.length ? events[events.length - 1].id : sinceId;
+
+      res.setHeader("Cache-Control", "no-store");
+      res.json({
+        events,
+        next_id: nextId,
+        has_more: events.length >= limit,
+      });
+    } catch (e) {
+      // A deployment that has not run the new schema should not break the
+      // existing field app. The client will simply retry this feed later.
+      console.warn("Completion change feed unavailable:", e?.message || e);
+      res.status(503).json({
+        error: "Completion change feed unavailable.",
+      });
+    }
+  }
+);
+
+/* =======================================================
    COMPLETION
 ======================================================= */
 
@@ -2634,6 +2724,19 @@ app.post(
         } else {
           demoDone.delete(bp);
         }
+
+        demoCompletionEvents.push({
+          id: ++demoCompletionEventId,
+          bp,
+          completed,
+          action: completed ? "completed" : "reopened",
+          remarks,
+          completion_date: completed ? new Date().toISOString() : null,
+          completed_by: req.user?.id || null,
+          completed_by_email: clean(req.user?.email).toLowerCase(),
+          changed_at: new Date().toISOString(),
+        });
+        if (demoCompletionEvents.length > 5000) demoCompletionEvents.splice(0, demoCompletionEvents.length - 5000);
 
         return res.json({
           ok: true,

@@ -113,13 +113,13 @@ export default function Farmers() {
     }
   };
 
-  const load = async (pageOverride = page, { silent = false } = {}) => {
+  const load = async (pageOverride = page, { silent = false, fresh = false } = {}) => {
     const currentSeq = ++requestSeq.current;
     const params = { ...filters, page: pageOverride, page_size: 40 };
     const cacheKey = JSON.stringify(params);
     const cached = responseCache.current.get(cacheKey);
 
-    if (cached) {
+    if (cached && !fresh) {
       setData(cached);
       setError("");
       setLoading(false);
@@ -132,7 +132,7 @@ export default function Farmers() {
     setError("");
 
     try {
-      const result = await api.farmers(params);
+      const result = fresh ? await api.farmersFresh(params) : await api.farmers(params);
       if (currentSeq !== requestSeq.current) return;
       responseCache.current.set(cacheKey, { ...result, __cachedAt: Date.now() });
 
@@ -146,6 +146,44 @@ export default function Farmers() {
       if (currentSeq === requestSeq.current) setLoading(false);
     }
   };
+
+  useEffect(() => {
+    let alive = true;
+    let refreshTimer = null;
+
+    const onCompletionChanges = async (event) => {
+      const changes = Array.isArray(event?.detail?.events) ? event.detail.events : [];
+      if (!changes.length || !alive) return;
+
+      // A local Complete/Reopen action always wins until its durable queue
+      // entry is confirmed by the server. We only need to know whether at
+      // least one remote change is relevant; one coalesced fresh load is enough
+      // even when several devices changed farmers in the same polling window.
+      const relevant = [];
+      for (const change of changes) {
+        const bp = String(change?.bp || "").trim();
+        if (!bp) continue;
+        if (await api.hasPendingCompletion(bp)) continue;
+        relevant.push(change);
+      }
+
+      if (!alive || !relevant.length) return;
+
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(async () => {
+        if (!alive) return;
+        responseCache.current.clear();
+        await load(page, { silent: true, fresh: true });
+      }, 80);
+    };
+
+    window.addEventListener("polygon-completion-changes", onCompletionChanges);
+    return () => {
+      alive = false;
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      window.removeEventListener("polygon-completion-changes", onCompletionChanges);
+    };
+  }, [page, JSON.stringify(filters)]);
 
   useEffect(() => {
     setPage(1);
@@ -171,49 +209,6 @@ export default function Farmers() {
     completed: data.farmers.filter((f) => f.status === "Completed").length,
     pending: data.farmers.filter((f) => f.status === "Pending").length,
   };
-
-  useEffect(() => {
-    const onCompletion = (event) => {
-      const detail = event?.detail;
-      if (!detail?.bp) return;
-      const completed = detail.eventType !== "DELETE";
-      const bp = String(detail.bp);
-      const record = detail.record || {};
-      setData((current) => {
-        const existing = (current.farmers || []).find((f) => String(f.bp) === bp);
-        if (!existing) return current;
-        const nextStatus = completed ? "Completed" : "Pending";
-        const shouldHide =
-          (filters.status === "Completed" && !completed) ||
-          (filters.status === "Pending" && completed);
-        const nextFarmers = shouldHide
-          ? (current.farmers || []).filter((f) => String(f.bp) !== bp)
-          : (current.farmers || []).map((f) => String(f.bp) === bp ? {
-              ...f,
-              status: nextStatus,
-              completion_date: completed ? (record.completed_at || f.completion_date || new Date().toISOString()) : null,
-              completion_by_email: completed ? (record.completed_by_email || f.completion_by_email) : null,
-            } : f);
-        if (existing.status === nextStatus && !shouldHide) return current;
-        const delta = existing.status === "Completed" ? 0 : (completed ? 1 : 0);
-        const countDelta = completed ? 1 : -1;
-        const statusCounts = current.statusCounts ? {
-          ...current.statusCounts,
-          completed: Math.max(0, current.statusCounts.completed + countDelta),
-          pending: Math.max(0, current.statusCounts.pending - countDelta),
-        } : current.statusCounts;
-        return {
-          ...current,
-          farmers: nextFarmers,
-          total: shouldHide ? Math.max(0, (current.total || 0) - 1) : current.total,
-          statusCounts,
-        };
-      });
-      responseCache.current.clear();
-    };
-    window.addEventListener("polygon-completion-updated", onCompletion);
-    return () => window.removeEventListener("polygon-completion-updated", onCompletion);
-  }, [filters.status]);
 
   const toggle = async (farmer) => {
     const completing = farmer.status !== "Completed";

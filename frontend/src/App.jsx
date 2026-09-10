@@ -11,7 +11,6 @@ import TeamLocation from "./pages/TeamLocation";
 import DataManager from "./pages/DataManager";
 import {AuthProvider,RequireAdmin,RequireAuth,useAuth} from "./auth";
 import { api } from "./api";
-import { supabase } from "./supabase";
 
 const fieldLinks=[
  {to:"/",label:"Dashboard",icon:LayoutDashboard,end:true},
@@ -26,32 +25,6 @@ const adminLinks=[
  {to:"/admin/audit",label:"Activity",icon:Activity},
  {to:"/admin/team-location",label:"Team Location",icon:MapPin},
 ];
-
-function CompletionRealtime(){
- const {profile}=useAuth();
- useEffect(()=>{
-  if(!profile?.user_id || !supabase) return undefined;
-  const channel=supabase
-   .channel("polygon-completion-live")
-   .on("postgres_changes",{event:"*",schema:"public",table:"completed_farmers"},(payload)=>{
-    const record=payload?.new || {};
-    const oldRecord=payload?.old || {};
-    const bp=record.bp_number || oldRecord.bp_number;
-    if(!bp) return;
-    window.dispatchEvent(new CustomEvent("polygon-completion-updated",{detail:{
-      eventType:payload.eventType,
-      bp:String(bp),
-      record,
-      oldRecord
-    }}));
-   })
-   .subscribe((status)=>{
-    if(status === "CHANNEL_ERROR") console.warn("Live completion updates unavailable");
-   });
-  return()=>{ supabase.removeChannel(channel); };
- },[profile?.user_id]);
- return null;
-}
 
 function LocationTracker(){
  const {profile}=useAuth();
@@ -112,6 +85,66 @@ function LocationTracker(){
  return null;
 }
 
+function CompletionSync(){
+ const {profile}=useAuth();
+ const cursorRef=React.useRef(0);
+ const startedAtRef=React.useRef(new Date().toISOString());
+ const runningRef=React.useRef(false);
+
+ useEffect(()=>{
+  if(!profile?.user_id) return undefined;
+
+  cursorRef.current=0;
+  startedAtRef.current=new Date().toISOString();
+  let alive=true;
+
+  const poll=async()=>{
+   if(!alive || !navigator.onLine || document.visibilityState!=="visible" || runningRef.current) return;
+   runningRef.current=true;
+   try{
+    let batches=0;
+    let hasMore=true;
+    while(alive && navigator.onLine && hasMore && batches<5){
+     const result=await api.completionChanges(cursorRef.current, cursorRef.current === 0 ? startedAtRef.current : "");
+     const events=Array.isArray(result?.events)?result.events:[];
+     const nextId=Number(result?.next_id);
+     if(Number.isFinite(nextId) && nextId>=cursorRef.current) cursorRef.current=nextId;
+
+     if(events.length){
+      window.dispatchEvent(new CustomEvent("polygon-completion-changes",{detail:{events}}));
+     }
+
+     hasMore=Boolean(result?.has_more) && events.length>0;
+     batches+=1;
+    }
+   }catch{
+    // Sync is deliberately best-effort. A temporary network/schema/server
+    // issue must never interfere with the existing field workflow.
+   }finally{
+    runningRef.current=false;
+   }
+  };
+
+  // Start immediately, then silently check for changes every 3 seconds.
+  poll();
+  const timer=window.setInterval(poll,3000);
+  const onVisible=()=>{if(document.visibilityState==="visible") poll();};
+  const onOnline=()=>poll();
+
+  document.addEventListener("visibilitychange",onVisible);
+  window.addEventListener("online",onOnline);
+
+  return()=>{
+   alive=false;
+   window.clearInterval(timer);
+   document.removeEventListener("visibilitychange",onVisible);
+   window.removeEventListener("online",onOnline);
+  };
+ },[profile?.user_id]);
+
+ return null;
+}
+
 function Shell(){
  const [open,setOpen]=useState(false);
  const [online,setOnline]=useState(navigator.onLine);
@@ -134,6 +167,7 @@ function Shell(){
  const links=adminArea?adminLinks:fieldLinks;
  return <div className="app">
   <LocationTracker/>
+  <CompletionSync/>
   <aside className={`sidebar ${open?"open":""}`}>
    <div className="brand"><div className="brand-mark">P</div><div><strong>Polygon Project</strong><span>{adminArea?"Admin Control":"Madikeri Operations"}</span></div><button className="mobile-close" onClick={()=>setOpen(false)}><X size={20}/></button></div>
    <nav>{links.map(({to,label,icon:Icon,end})=><NavLink key={to} to={to} end={end} className={({isActive})=>isActive?"nav-item active":"nav-item"}><Icon size={18}/><span>{label}</span></NavLink>)}</nav>

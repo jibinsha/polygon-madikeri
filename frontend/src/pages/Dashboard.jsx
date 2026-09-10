@@ -16,20 +16,42 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    const onCompletion = (event) => {
-      const completedNow = event?.detail?.eventType !== "DELETE";
-      setData((current) => {
-        if (!current?.totals) return current;
-        const completed = Math.max(0, Number(current.totals.completed || 0) + (completedNow ? 1 : -1));
-        const total = Number(current.totals.farmers || current.allTotal || 0);
-        const pending = Math.max(0, total - completed);
-        return { ...current, totals: { ...current.totals, completed, pending, progress: total ? Math.round(completed * 100 / total) : 0 } };
-      });
-    };
-    window.addEventListener("polygon-completion-updated", onCompletion);
     load();
     const timer = setInterval(load, 60000);
-    return () => { clearInterval(timer); window.removeEventListener("polygon-completion-updated", onCompletion); };
+
+    const onCompletionChanges = async (event) => {
+      const changes = Array.isArray(event?.detail?.events) ? event.detail.events : [];
+      if (!changes.length) return;
+
+      let relevant = false;
+      for (const change of changes) {
+        const action = String(change?.action || "").toLowerCase();
+        const bp = String(change?.bp || "").trim();
+        if (!bp || !["completed", "reopened"].includes(action)) continue;
+        if (await api.hasPendingCompletion(bp)) continue;
+        relevant = true;
+        break;
+      }
+
+      if (!relevant) return;
+
+      // Re-read only after an actual completion/reopen event. This is a silent
+      // refresh of dashboard data, not a page reload, so no navigation,
+      // filters, or Complete/Reopen state is disturbed.
+      try {
+        const fresh = await api.dashboardFresh();
+        setData(fresh);
+        setError("");
+      } catch {
+        // The normal 60-second dashboard refresh remains the fallback.
+      }
+    };
+
+    window.addEventListener("polygon-completion-changes", onCompletionChanges);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("polygon-completion-changes", onCompletionChanges);
+    };
   }, []);
 
   if (error) {
