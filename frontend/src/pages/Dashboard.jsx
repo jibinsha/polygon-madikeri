@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { CheckCircle2, Clock3, Layers, RefreshCw, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -7,81 +7,46 @@ import { PageHead, Loading, ErrorCard, pct } from "../components";
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
-  const requestSeq = useRef(0);
 
   const load = () => {
-    const seq = ++requestSeq.current;
     setError("");
     api.dashboard()
-      .then((result) => {
-        // Never let an older cached/normal request overwrite a newer live
-        // completion result. This is the key guard against the dashboard
-        // briefly showing the old count (including zero).
-        if (seq === requestSeq.current) setData(result);
-      })
-      .catch((e) => {
-        if (seq === requestSeq.current) setError(e.message || "Unable to load dashboard");
-      });
+      .then(setData)
+      .catch((e) => setError(e.message || "Unable to load dashboard"));
   };
 
   useEffect(() => {
-    load();
-    const timer = setInterval(load, 60000);
-
+    let disposed = false;
     let refreshInFlight = false;
-    let refreshTimer = null;
 
-    const refreshLive = async () => {
-      if (refreshInFlight) return;
+    // Keep the existing first load exactly as before.
+    load();
+
+    // Dashboard-only background refresh.
+    // This deliberately does NOT call load(), because that path is cached.
+    // It asks for a fresh dashboard snapshot and never reloads the page.
+    const refreshDashboard = async () => {
+      if (disposed || refreshInFlight || !navigator.onLine) return;
       refreshInFlight = true;
-      const seq = ++requestSeq.current;
+
       try {
-        // This endpoint deliberately bypasses the normal dashboard/farmer
-        // caches. It is used only after a confirmed status mutation or a
-        // remote completion event, so the dashboard cannot momentarily
-        // reconcile against an older cached "0 completed" snapshot.
         const fresh = await api.dashboardFresh();
-        if (fresh && fresh.totals && seq === requestSeq.current) {
+        if (!disposed && fresh && !fresh.offline) {
           setData(fresh);
           setError("");
         }
       } catch {
-        // Keep the last known dashboard. The next 3-second sync or the
-        // normal 60-second refresh will try again.
+        // Keep the last good dashboard visible. The next 3-second check retries.
       } finally {
         refreshInFlight = false;
       }
     };
 
-    const scheduleLiveRefresh = () => {
-      if (refreshTimer) window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => {
-        refreshTimer = null;
-        refreshLive();
-      }, 0);
-    };
+    const timer = setInterval(refreshDashboard, 3000);
 
-    const onCompletionChanges = (event) => {
-      const changes = Array.isArray(event?.detail?.events) ? event.detail.events : [];
-      if (!changes.some((change) => {
-        const action = String(change?.action || "").toLowerCase();
-        return action === "completed" || action === "reopened";
-      })) return;
-      scheduleLiveRefresh();
-    };
-
-    const onCompletionConfirmed = (event) => {
-      const action = String(event?.detail?.action || "").toLowerCase();
-      if (action === "completed" || action === "reopened") scheduleLiveRefresh();
-    };
-
-    window.addEventListener("polygon-completion-changes", onCompletionChanges);
-    window.addEventListener("polygon-completion-confirmed", onCompletionConfirmed);
     return () => {
+      disposed = true;
       clearInterval(timer);
-      if (refreshTimer) window.clearTimeout(refreshTimer);
-      window.removeEventListener("polygon-completion-changes", onCompletionChanges);
-      window.removeEventListener("polygon-completion-confirmed", onCompletionConfirmed);
     };
   }, []);
 

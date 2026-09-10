@@ -2056,12 +2056,7 @@ app.get(
     try {
       // Dashboard only needs completion totals and trader completion.
       // Do not build/download map or cluster data here.
-      // Normal dashboard requests keep the 60-second farmer cache for speed.
-      // Explicit live-sync requests bypass that cache and rebuild completion
-      // status directly from Supabase. This prevents a cross-device update
-      // from being followed by an older cached dashboard snapshot.
-      const liveSync = clean(req.query._sync);
-      const all = liveSync ? await allFarmersFromDb() : await allFarmers();
+      const all = await allFarmers();
       const rows = applyFilters(all, req.query);
       const payload = {
         totals: completionTotals(rows),
@@ -2069,10 +2064,7 @@ app.get(
         allTotal: rows.length,
       };
 
-      res.setHeader(
-        "Cache-Control",
-        liveSync ? "no-store, no-cache, must-revalidate" : "private, max-age=20, stale-while-revalidate=40"
-      );
+      res.setHeader("Cache-Control", "private, max-age=20, stale-while-revalidate=40");
       res.json(payload);
     } catch (e) {
       console.error("Dashboard error:", e);

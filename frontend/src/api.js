@@ -363,13 +363,6 @@ async function flushCompletionQueue() {
         });
         await updateOfflineCompletion(item.bp, item.completed, item.remarks || "");
         await removeQueuedCompletion(item.id, item.bp, item.queuedAt);
-        window.dispatchEvent(new CustomEvent("polygon-completion-confirmed", {
-          detail: {
-            bp: String(item.bp),
-            completed: Boolean(item.completed),
-            action: item.completed ? "completed" : "reopened",
-          },
-        }));
       } catch (error) {
         if (!isNetworkError(error)) {
           await removeQueuedCompletion(item.id, item.bp, item.queuedAt).catch(() => {});
@@ -693,17 +686,6 @@ export const api = {
         );
         await updateOfflineCompletion(bp, completed, remarks);
         await removeQueuedCompletion(queued.queueId, bp, queued.queuedAt);
-        // The server has now committed the mutation. Notify the dashboard
-        // immediately instead of waiting for the next 3-second poll. This is
-        // a confirmation event only; the existing queue/optimistic workflow
-        // remains unchanged.
-        window.dispatchEvent(new CustomEvent("polygon-completion-confirmed", {
-          detail: {
-            bp: String(bp),
-            completed: Boolean(completed),
-            action: completed ? "completed" : "reopened",
-          },
-        }));
       } catch (error) {
         // Network/auth interruption: keep the durable action for the normal
         // sync loop. A later retry will reconcile it with the server.
