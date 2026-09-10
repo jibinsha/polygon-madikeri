@@ -1,4 +1,4 @@
-const VERSION = "polygon-madikeri-v5";
+const VERSION = "polygon-madikeri-v6";
 const APP_CACHE = `${VERSION}-app`;
 const TILE_CACHE = `${VERSION}-tiles`;
 const APP_SHELL = [

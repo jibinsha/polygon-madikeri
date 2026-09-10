@@ -30,6 +30,20 @@ const CENTER = [13.0714100566, 75.6442024220];
 const FARMER_FIT_MAX_ZOOM = 13;
 const TEAM_REFRESH_MS = 5000;
 
+function normalizeLocation(value) {
+  if (!value) return null;
+  const lat = Number(value.lat ?? value.latitude);
+  const lon = Number(value.lon ?? value.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  return {
+    lat,
+    lon,
+    accuracy: Number.isFinite(Number(value.accuracy)) ? Number(value.accuracy) : null,
+    updatedAt: value.updatedAt || value.updated_at || value.created_at || new Date().toISOString(),
+  };
+}
+
 function traderFromBp(bp) {
   const parts = String(bp || "").split("-");
   if (parts.length < 3) return "";
@@ -119,7 +133,9 @@ function RecenterControl({ location }) {
       type="button"
       disabled={!location}
       onClick={() => {
-        if (location) map.setView([location.lat, location.lon], 17, { animate: true });
+        if (location && Number.isFinite(Number(location.lat)) && Number.isFinite(Number(location.lon))) {
+          map.setView([Number(location.lat), Number(location.lon)], 17, { animate: true });
+        }
       }}
     >
       <Navigation size={17} />
@@ -132,8 +148,8 @@ function AutoLocate({ location }) {
   const centered = useRef(false);
 
   useEffect(() => {
-    if (!location || centered.current) return;
-    map.setView([location.lat, location.lon], 15, { animate: false });
+    if (!location || !Number.isFinite(Number(location.lat)) || !Number.isFinite(Number(location.lon)) || centered.current) return;
+    map.setView([Number(location.lat), Number(location.lon)], 15, { animate: false });
     centered.current = true;
   }, [location, map]);
 
@@ -218,7 +234,7 @@ function FarmerPopup({ farmer, myLocation }) {
 export default function ClusterMap() {
   const [data, setData] = useState({ farmers: [], office: null });
   const [team, setTeam] = useState([]);
-  const [myLocation, setMyLocation] = useState(() => window.__polygonLatestLocation || null);
+  const [myLocation, setMyLocation] = useState(() => normalizeLocation(window.__polygonLatestLocation));
   const [loading, setLoading] = useState(true);
   const [refreshingTeam, setRefreshingTeam] = useState(false);
   const [error, setError] = useState("");
@@ -274,12 +290,9 @@ export default function ClusterMap() {
     const onLocation = (event) => {
       const p = event?.detail;
       if (!p) return;
-      setMyLocation({
-        lat: p.latitude,
-        lon: p.longitude,
-        accuracy: p.accuracy,
-        updatedAt: p.updatedAt || new Date().toISOString(),
-      });
+      const location = normalizeLocation(p);
+      if (!location) return;
+      setMyLocation(location);
     };
     window.addEventListener("polygon-location-updated", onLocation);
 
@@ -313,7 +326,11 @@ export default function ClusterMap() {
 
   const completed = useMemo(() => farmers.filter((f) => f.status === "Completed").length, [farmers]);
   const pending = farmers.length - completed;
-  const mappedTeam = useMemo(() => team.filter((u) => u.location && Number.isFinite(Number(u.location.latitude)) && Number.isFinite(Number(u.location.longitude))), [team]);
+  const mappedTeam = useMemo(() => team.filter((u) => {
+    const lat = Number(u?.location?.latitude);
+    const lon = Number(u?.location?.longitude);
+    return Number.isFinite(lat) && Number.isFinite(lon) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+  }), [team]);
 
   return (
     <div className="open-map-page">
