@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { CheckCircle2, Clock3, Layers, RefreshCw, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
@@ -7,50 +7,81 @@ import { PageHead, Loading, ErrorCard, pct } from "../components";
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
+  const requestSeq = useRef(0);
 
   const load = () => {
+    const seq = ++requestSeq.current;
     setError("");
     api.dashboard()
-      .then(setData)
-      .catch((e) => setError(e.message || "Unable to load dashboard"));
+      .then((result) => {
+        // Never let an older cached/normal request overwrite a newer live
+        // completion result. This is the key guard against the dashboard
+        // briefly showing the old count (including zero).
+        if (seq === requestSeq.current) setData(result);
+      })
+      .catch((e) => {
+        if (seq === requestSeq.current) setError(e.message || "Unable to load dashboard");
+      });
   };
 
   useEffect(() => {
     load();
     const timer = setInterval(load, 60000);
 
-    const onCompletionChanges = async (event) => {
-      const changes = Array.isArray(event?.detail?.events) ? event.detail.events : [];
-      if (!changes.length) return;
+    let refreshInFlight = false;
+    let refreshTimer = null;
 
-      let relevant = false;
-      for (const change of changes) {
-        const action = String(change?.action || "").toLowerCase();
-        const bp = String(change?.bp || "").trim();
-        if (!bp || !["completed", "reopened"].includes(action)) continue;
-        if (await api.hasPendingCompletion(bp)) continue;
-        relevant = true;
-        break;
-      }
-
-      if (!relevant) return;
-
-      // Re-read only after an actual completion/reopen event. This is a silent
-      // refresh of dashboard data, not a page reload, so no navigation,
-      // filters, or Complete/Reopen state is disturbed.
+    const refreshLive = async () => {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      const seq = ++requestSeq.current;
       try {
+        // This endpoint deliberately bypasses the normal dashboard/farmer
+        // caches. It is used only after a confirmed status mutation or a
+        // remote completion event, so the dashboard cannot momentarily
+        // reconcile against an older cached "0 completed" snapshot.
         const fresh = await api.dashboardFresh();
-        setData(fresh);
-        setError("");
+        if (fresh && fresh.totals && seq === requestSeq.current) {
+          setData(fresh);
+          setError("");
+        }
       } catch {
-        // The normal 60-second dashboard refresh remains the fallback.
+        // Keep the last known dashboard. The next 3-second sync or the
+        // normal 60-second refresh will try again.
+      } finally {
+        refreshInFlight = false;
       }
     };
 
+    const scheduleLiveRefresh = () => {
+      if (refreshTimer) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        refreshLive();
+      }, 0);
+    };
+
+    const onCompletionChanges = (event) => {
+      const changes = Array.isArray(event?.detail?.events) ? event.detail.events : [];
+      if (!changes.some((change) => {
+        const action = String(change?.action || "").toLowerCase();
+        return action === "completed" || action === "reopened";
+      })) return;
+      scheduleLiveRefresh();
+    };
+
+    const onCompletionConfirmed = (event) => {
+      const action = String(event?.detail?.action || "").toLowerCase();
+      if (action === "completed" || action === "reopened") scheduleLiveRefresh();
+    };
+
     window.addEventListener("polygon-completion-changes", onCompletionChanges);
+    window.addEventListener("polygon-completion-confirmed", onCompletionConfirmed);
     return () => {
       clearInterval(timer);
+      if (refreshTimer) window.clearTimeout(refreshTimer);
       window.removeEventListener("polygon-completion-changes", onCompletionChanges);
+      window.removeEventListener("polygon-completion-confirmed", onCompletionConfirmed);
     };
   }, []);
 

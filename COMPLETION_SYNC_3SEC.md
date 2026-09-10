@@ -41,3 +41,8 @@ Reopen works the same way in the opposite direction.
 ## Important
 
 The 3-second timer is a **status synchronization timer**, not a full-page auto-refresh.
+
+
+## Dashboard race/fallback protection
+
+The dashboard now uses a request-sequence guard so an older normal/cached GET cannot overwrite a newer live completion result. Live dashboard refreshes use `?_sync=<timestamp>` and the backend bypasses the 60-second farmer cache for those requests. A successful Complete/Reopen mutation also emits a local confirmation event so the dashboard can refresh immediately after the database commit, without waiting for the 3-second poll.
