@@ -51,18 +51,79 @@ const notifyOfflineChange = () => {
 
 async function queueCompletion(bp, completed, remarks) {
   const queue = (await offlineGet(userScopedKey(OFFLINE_QUEUE_KEY))) || [];
+  const queueId =
+    (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `completion-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const next = {
+    id: queueId,
     bp: String(bp),
     completed: Boolean(completed),
     remarks: remarks || "",
     queuedAt: new Date().toISOString(),
   };
-  // Keep only the newest offline action for a BP.
+  // Keep only the newest queued action for a BP. The unique id lets an older
+  // in-flight request finish without deleting a newer Complete/Reopen action.
   const filtered = queue.filter((item) => String(item.bp) !== String(bp));
   filtered.push(next);
   await offlinePut(userScopedKey(OFFLINE_QUEUE_KEY), filtered);
   notifyOfflineChange();
-  return { ok: true, bp, completed: Boolean(completed), remarks: remarks || "", offlineQueued: true };
+  return {
+    ok: true,
+    bp,
+    completed: Boolean(completed),
+    remarks: remarks || "",
+    offlineQueued: true,
+    queueId,
+  };
+}
+
+async function removeQueuedCompletion(queueId, bp, queuedAt) {
+  const queue = (await offlineGet(userScopedKey(OFFLINE_QUEUE_KEY))) || [];
+  const next = queue.filter((item) => {
+    if (queueId) return String(item.id || "") !== String(queueId);
+    return !(
+      String(item.bp) === String(bp) &&
+      (!queuedAt || String(item.queuedAt || "") === String(queuedAt))
+    );
+  });
+  if (next.length !== queue.length) {
+    await offlinePut(userScopedKey(OFFLINE_QUEUE_KEY), next);
+    notifyOfflineChange();
+  }
+}
+
+async function applyPendingCompletionQueue(payload) {
+  if (!payload || !Array.isArray(payload.farmers)) return payload;
+  const queue = (await offlineGet(userScopedKey(OFFLINE_QUEUE_KEY))) || [];
+  if (!queue.length) return payload;
+
+  const byBp = new Map(queue.map((item) => [String(item.bp), item]));
+  const farmers = payload.farmers.map((farmer) => {
+    const item = byBp.get(String(farmer.bp));
+    if (!item) return farmer;
+    return {
+      ...farmer,
+      status: item.completed ? "Completed" : "Pending",
+      completion_date: item.completed
+        ? (item.completedAt || item.queuedAt || farmer.completion_date)
+        : null,
+      remarks: item.remarks || farmer.remarks || "",
+    };
+  });
+
+  const completed = farmers.filter((f) => f.status === "Completed").length;
+  return {
+    ...payload,
+    farmers,
+    statusCounts: payload.statusCounts
+      ? {
+          ...payload.statusCounts,
+          completed,
+          pending: farmers.length - completed,
+        }
+      : payload.statusCounts,
+  };
 }
 
 async function readCachedApi(path) {
@@ -290,7 +351,9 @@ async function flushCompletionQueue() {
 
   syncInProgress = true;
   try {
-    const remaining = [];
+    // Process the snapshot, but remove successful items by their unique id.
+    // Never overwrite the whole queue at the end: a new Complete/Reopen action
+    // may have been added while an older request was in flight.
     for (const item of queue) {
       try {
         await request(`/api/farmers/${encodeURIComponent(item.bp)}/completion`, {
@@ -299,13 +362,15 @@ async function flushCompletionQueue() {
           body: JSON.stringify({ completed: item.completed, remarks: item.remarks || "" }),
         });
         await updateOfflineCompletion(item.bp, item.completed, item.remarks || "");
+        await removeQueuedCompletion(item.id, item.bp, item.queuedAt);
       } catch (error) {
-        remaining.push(item);
-        if (isNetworkError(error)) break;
+        if (!isNetworkError(error)) {
+          await removeQueuedCompletion(item.id, item.bp, item.queuedAt).catch(() => {});
+        } else {
+          break;
+        }
       }
     }
-    await offlinePut(userScopedKey(OFFLINE_QUEUE_KEY), remaining);
-    if (!remaining.length) notifyOfflineChange();
   } finally {
     syncInProgress = false;
   }
@@ -560,44 +625,57 @@ export const api = {
   farmers: async (params = {}) => {
     if (!navigator.onLine) {
       const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params, await readOfflineGroups());
-      if (cached) return cached;
+      return applyPendingCompletionQueue(cached);
     }
     try {
-      return await request(`/api/farmers?${query(params)}`);
+      const result = await request(`/api/farmers?${query(params)}`);
+      return applyPendingCompletionQueue(result);
     } catch (error) {
       if (isNetworkError(error)) {
         const cached = applyOfflineFarmerFilters(await readOfflineMaster(), params, await readOfflineGroups());
-        if (cached) return cached;
+        return applyPendingCompletionQueue(cached);
       }
       throw error;
     }
   },
 
   setCompleted: async (bp, completed, remarks = "") => {
-    if (!navigator.onLine) {
-      await updateOfflineCompletion(bp, completed, remarks);
-      return queueCompletion(bp, completed, remarks);
-    }
-    try {
-      const result = await request(
-        `/api/farmers/${encodeURIComponent(bp)}/completion`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ completed, remarks }),
-        }
-      );
-      // The server has already committed the status. Keep the field action
-      // fast; update the offline snapshot in the background.
-      updateOfflineCompletion(bp, completed, remarks).catch(() => {});
-      return result;
-    } catch (error) {
-      if (isNetworkError(error)) {
+    // Always persist the user's action first. This makes Complete/Reopen
+    // durable even if the page is refreshed while the network write is pending.
+    const queued = await queueCompletion(bp, completed, remarks);
+    updateOfflineCompletion(bp, completed, remarks).catch(() => {});
+
+    if (!navigator.onLine) return queued;
+
+    // Do not make the field UI wait for the network/database round trip.
+    // The durable queue remains until this exact action is confirmed by the server.
+    void (async () => {
+      try {
+        await request(
+          `/api/farmers/${encodeURIComponent(bp)}/completion`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ completed, remarks }),
+          }
+        );
         await updateOfflineCompletion(bp, completed, remarks);
-        return queueCompletion(bp, completed, remarks);
+        await removeQueuedCompletion(queued.queueId, bp, queued.queuedAt);
+      } catch (error) {
+        // Network/auth interruption: keep the durable action for the normal
+        // sync loop. A later retry will reconcile it with the server.
+        // A non-network HTTP rejection is a real server rejection, so do not
+        // keep retrying it forever.
+        if (!isNetworkError(error)) {
+          await removeQueuedCompletion(queued.queueId, bp, queued.queuedAt).catch(() => {});
+          window.dispatchEvent(new CustomEvent("polygon-completion-error", {
+            detail: { bp: String(bp), message: error?.message || "Could not update visit status" },
+          }));
+        }
       }
-      throw error;
-    }
+    })();
+
+    return { ...queued, pendingSync: true };
   },
 
   /* ----------------------------------------------------
@@ -608,13 +686,16 @@ export const api = {
     const qs = query(params);
     const path = qs ? `/api/open-map?${qs}` : "/api/open-map";
     if (!navigator.onLine) {
-      return applyOfflineOpenMapFilters(await readCachedApi("/api/open-map"), params, await readOfflineGroups());
+      const cached = applyOfflineOpenMapFilters(await readCachedApi("/api/open-map"), params, await readOfflineGroups());
+      return applyPendingCompletionQueue(cached);
     }
     try {
-      return await request(path);
+      const result = await request(path);
+      return applyPendingCompletionQueue(result);
     } catch (error) {
       if (isNetworkError(error)) {
-        return applyOfflineOpenMapFilters(await readCachedApi("/api/open-map"), params, await readOfflineGroups());
+        const cached = applyOfflineOpenMapFilters(await readCachedApi("/api/open-map"), params, await readOfflineGroups());
+        return applyPendingCompletionQueue(cached);
       }
       throw error;
     }
