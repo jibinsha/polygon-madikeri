@@ -16,9 +16,20 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
+    const onCompletion = (event) => {
+      const completedNow = event?.detail?.eventType !== "DELETE";
+      setData((current) => {
+        if (!current?.totals) return current;
+        const completed = Math.max(0, Number(current.totals.completed || 0) + (completedNow ? 1 : -1));
+        const total = Number(current.totals.farmers || current.allTotal || 0);
+        const pending = Math.max(0, total - completed);
+        return { ...current, totals: { ...current.totals, completed, pending, progress: total ? Math.round(completed * 100 / total) : 0 } };
+      });
+    };
+    window.addEventListener("polygon-completion-updated", onCompletion);
     load();
     const timer = setInterval(load, 60000);
-    return () => clearInterval(timer);
+    return () => { clearInterval(timer); window.removeEventListener("polygon-completion-updated", onCompletion); };
   }, []);
 
   if (error) {

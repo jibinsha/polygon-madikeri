@@ -279,6 +279,27 @@ export default function ClusterMap() {
   };
 
   useEffect(() => {
+    const onCompletion = (event) => {
+      const detail = event?.detail;
+      if (!detail?.bp) return;
+      const bp = String(detail.bp);
+      const completed = detail.eventType !== "DELETE";
+      const record = detail.record || {};
+      setData((current) => ({
+        ...current,
+        farmers: (current.farmers || []).map((f) => String(f.bp) === bp ? {
+          ...f,
+          status: completed ? "Completed" : "Pending",
+          completion_date: completed ? (record.completed_at || f.completion_date || new Date().toISOString()) : null,
+          completion_by_email: completed ? (record.completed_by_email || f.completion_by_email) : null,
+        } : f),
+      }));
+    };
+    window.addEventListener("polygon-completion-updated", onCompletion);
+    return () => window.removeEventListener("polygon-completion-updated", onCompletion);
+  }, []);
+
+  useEffect(() => {
     // Load farmer points first; team positions are independent and refresh
     // separately so the map becomes usable as soon as the farmer payload arrives.
     loadMap();

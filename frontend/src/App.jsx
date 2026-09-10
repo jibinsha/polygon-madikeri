@@ -11,6 +11,7 @@ import TeamLocation from "./pages/TeamLocation";
 import DataManager from "./pages/DataManager";
 import {AuthProvider,RequireAdmin,RequireAuth,useAuth} from "./auth";
 import { api } from "./api";
+import { supabase } from "./supabase";
 
 const fieldLinks=[
  {to:"/",label:"Dashboard",icon:LayoutDashboard,end:true},
@@ -25,6 +26,32 @@ const adminLinks=[
  {to:"/admin/audit",label:"Activity",icon:Activity},
  {to:"/admin/team-location",label:"Team Location",icon:MapPin},
 ];
+
+function CompletionRealtime(){
+ const {profile}=useAuth();
+ useEffect(()=>{
+  if(!profile?.user_id || !supabase) return undefined;
+  const channel=supabase
+   .channel("polygon-completion-live")
+   .on("postgres_changes",{event:"*",schema:"public",table:"completed_farmers"},(payload)=>{
+    const record=payload?.new || {};
+    const oldRecord=payload?.old || {};
+    const bp=record.bp_number || oldRecord.bp_number;
+    if(!bp) return;
+    window.dispatchEvent(new CustomEvent("polygon-completion-updated",{detail:{
+      eventType:payload.eventType,
+      bp:String(bp),
+      record,
+      oldRecord
+    }}));
+   })
+   .subscribe((status)=>{
+    if(status === "CHANNEL_ERROR") console.warn("Live completion updates unavailable");
+   });
+  return()=>{ supabase.removeChannel(channel); };
+ },[profile?.user_id]);
+ return null;
+}
 
 function LocationTracker(){
  const {profile}=useAuth();

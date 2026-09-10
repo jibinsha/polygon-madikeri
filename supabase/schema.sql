@@ -57,6 +57,7 @@ create index if not exists cluster_points_gps_idx on public.cluster_points(latit
 
 alter table public.farmers enable row level security;
 alter table public.completed_farmers enable row level security;
+alter table public.completed_farmers REPLICA IDENTITY FULL;
 alter table public.cluster_points enable row level security;
 
 -- The backend uses the service-role key and therefore bypasses RLS.
@@ -166,3 +167,37 @@ create index if not exists team_locations_user_idx on public.team_locations(user
 create index if not exists team_locations_created_idx on public.team_locations(created_at desc);
 create index if not exists team_locations_user_created_idx on public.team_locations(user_id, created_at desc);
 alter table public.team_locations enable row level security;
+
+
+-- ======================================================
+-- REAL-TIME COMPLETION UPDATES
+-- Lets authenticated field devices receive Complete/Reopen
+-- changes immediately without requiring a page refresh.
+-- ======================================================
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime'
+      AND schemaname = 'public'
+      AND tablename = 'completed_farmers'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.completed_farmers;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'completed_farmers'
+      AND policyname = 'authenticated can receive completion updates'
+  ) THEN
+    CREATE POLICY "authenticated can receive completion updates"
+      ON public.completed_farmers
+      FOR SELECT
+      TO authenticated
+      USING (true);
+  END IF;
+END $$;
